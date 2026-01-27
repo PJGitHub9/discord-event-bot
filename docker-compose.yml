@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  event-scheduler-bot:
+    build: .
+    container_name: pjs-discord-event-bot
+    restart: unless-stopped
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - GUILD_ID=${GUILD_ID}
+      - EVENTS_CHANNEL_ID=${EVENTS_CHANNEL_ID}
+    volumes:
+      # Persist database
+      - ./data:/app/data
+      # If you need to edit code without rebuilding
+      - ./bot.py:/app/bot.py
+      - ./database.py:/app/database.py
+    env_file:
+      - .env
+    # Uncomment if you want to use host networking
+    # network_mode: host
+
+# To add more bots, add more services:
+# 
+#   another-bot:
+#     build: ../another-bot
+#     container_name: pjs-discord-another-bot
+#     restart: unless-stopped
+#     environment:
+#       - DISCORD_TOKEN=${ANOTHER_BOT_TOKEN}
+#     volumes:
+#       - ../another-bot/data:/app/data
+#     env_file:
+#       - ../another-bot/.env
