@@ -117,7 +117,30 @@ In the Bot section, enable:
 
 ## 🐳 Docker Deployment
 
-### Using Docker Compose (Recommended)
+### Using Pre-built Image from GHCR (Easiest)
+
+```bash
+# Pull the latest image
+docker pull ghcr.io/yourusername/discord-event-bot:latest
+
+# Run the container
+docker run -d \
+  --name discord-event-bot \
+  --restart unless-stopped \
+  -v $(pwd)/data:/app/data \
+  --env-file .env \
+  ghcr.io/yourusername/discord-event-bot:latest
+```
+
+Or update `docker-compose.yml` to use the pre-built image:
+```yaml
+services:
+  discord-bot:
+    image: ghcr.io/yourusername/discord-event-bot:latest
+    # ... rest of config
+```
+
+### Using Docker Compose (Build Locally)
 
 ```bash
 # Start the bot
@@ -130,7 +153,7 @@ docker-compose logs -f
 docker-compose down
 ```
 
-### Using Docker
+### Building Docker Image Manually
 
 ```bash
 # Build the image
@@ -254,7 +277,22 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - Global commands can take up to 1 hour to sync across Discord
 - First-time command sync may take a few minutes
 
-## 🙏 Acknowledgments
+## � CI/CD & Automation
+
+The repository includes GitHub Actions automation:
+
+- **Automatic Docker Builds**: Every push to `main` builds and publishes to GHCR
+- **Version Tags**: Tag releases with `v1.0.0` format for versioned images
+- **Pull Request Checks**: PRs are built (but not published) to verify changes
+- **Image Registry**: [ghcr.io/yourusername/discord-event-bot](https://github.com/yourusername/discord-event-bot/pkgs/container/discord-event-bot)
+
+**Using tagged versions:**
+```bash
+docker pull ghcr.io/yourusername/discord-event-bot:v1.0.0
+docker pull ghcr.io/yourusername/discord-event-bot:latest
+```
+
+## �🙏 Acknowledgments
 
 - Built with [discord.py](https://github.com/Rapptz/discord.py)
 - Inspired by the need for better event management in Discord communities

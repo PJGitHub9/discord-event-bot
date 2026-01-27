@@ -2,8 +2,9 @@ version: '3.8'
 
 services:
   event-scheduler-bot:
+    # Build from local Dockerfile
     build: .
-    container_name: pjs-discord-event-bot
+    image: ghcr.io/yourusername/discord-event-bot:latest
     restart: unless-stopped
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
