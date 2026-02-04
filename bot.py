@@ -50,64 +50,130 @@ event_group = app_commands.Group(name="event", description="Event management com
 
 # Attendance Button View
 class AttendanceView(View):
-    def __init__(self, event_role_id: int):
+    def __init__(self, event_role_id: int = None, thread_id: int = None):
         super().__init__(timeout=None)  # Buttons don't expire
         self.event_role_id = event_role_id
+        self.thread_id = thread_id
     
     @discord.ui.button(label="Yes", style=discord.ButtonStyle.green, custom_id="attend_yes", emoji="✅")
     async def yes_button(self, interaction: discord.Interaction, button: Button):
-        await self._handle_attendance(interaction, True)
+        await self._handle_attendance(interaction, True, "Yes")
     
     @discord.ui.button(label="Maybe", style=discord.ButtonStyle.gray, custom_id="attend_maybe", emoji="❓")
     async def maybe_button(self, interaction: discord.Interaction, button: Button):
-        await self._handle_attendance(interaction, True)
+        await self._handle_attendance(interaction, True, "Maybe")
     
     @discord.ui.button(label="No", style=discord.ButtonStyle.red, custom_id="attend_no", emoji="❌")
     async def no_button(self, interaction: discord.Interaction, button: Button):
-        await self._handle_attendance(interaction, False)
+        await self._handle_attendance(interaction, False, "No")
     
-    async def _handle_attendance(self, interaction: discord.Interaction, should_add_role: bool):
+    @discord.ui.button(label="+1", style=discord.ButtonStyle.blurple, custom_id="attend_plus_one", emoji="➕")
+    async def plus_one_button(self, interaction: discord.Interaction, button: Button):
+        await self._handle_plus_one(interaction)
+    
+    async def _handle_attendance(self, interaction: discord.Interaction, should_add_role: bool, response_type: str):
         """Handle attendance button clicks."""
         try:
-            if not self.event_role_id:
-                await interaction.response.send_message("No event role configured for this event.", ephemeral=True)
-                return
-            
-            event_role = interaction.guild.get_role(self.event_role_id)
-            if not event_role:
-                await interaction.response.send_message("Event role not found.", ephemeral=True)
-                return
-            
             member = interaction.user
             
-            if should_add_role:
-                if event_role not in member.roles:
-                    await member.add_roles(event_role)
-                    await interaction.response.send_message(
-                        f"✅ You've been added to {event_role.mention}! You'll be notified about updates.",
-                        ephemeral=True
-                    )
-                    logger.info(f'{member} joined event via button (added role: {event_role.name})')
+            # Record attendance in database
+            if self.thread_id:
+                await database.record_attendance(
+                    thread_id=self.thread_id,
+                    user_id=member.id,
+                    response=response_type.lower()
+                )
+            
+            # If there's a role, manage it
+            if self.event_role_id:
+                event_role = interaction.guild.get_role(self.event_role_id)
+                if not event_role:
+                    await interaction.response.send_message("Event role not found.", ephemeral=True)
+                    return
+                
+                if should_add_role:
+                    if event_role not in member.roles:
+                        await member.add_roles(event_role)
+                        await interaction.response.send_message(
+                            f"✅ You've been added to {event_role.mention}! You'll be notified about updates.",
+                            ephemeral=True
+                        )
+                        logger.info(f'{member} joined event via button (added role: {event_role.name})')
+                    else:
+                        await interaction.response.send_message(
+                            f"You already have the {event_role.mention} role!",
+                            ephemeral=True
+                        )
                 else:
-                    await interaction.response.send_message(
-                        f"You already have the {event_role.mention} role!",
-                        ephemeral=True
-                    )
+                    if event_role in member.roles:
+                        await member.remove_roles(event_role)
+                        await interaction.response.send_message(
+                            f"❌ You've been removed from {event_role.mention}.",
+                            ephemeral=True
+                        )
+                        logger.info(f'{member} left event via button (removed role: {event_role.name})')
+                    else:
+                        await interaction.response.send_message(
+                            "Thanks for letting us know!",
+                            ephemeral=True
+                        )
             else:
-                if event_role in member.roles:
-                    await member.remove_roles(event_role)
+                # No role - just send confirmation
+                if response_type == "Yes":
                     await interaction.response.send_message(
-                        f"❌ You've been removed from {event_role.mention}.",
+                        "✅ Great! Thanks for confirming your attendance!",
                         ephemeral=True
                     )
-                    logger.info(f'{member} left event via button (removed role: {event_role.name})')
+                elif response_type == "Maybe":
+                    await interaction.response.send_message(
+                        "❓ Thanks for letting us know you might attend!",
+                        ephemeral=True
+                    )
                 else:
                     await interaction.response.send_message(
-                        "Thanks for letting us know!",
+                        "❌ Thanks for letting us know!",
                         ephemeral=True
                     )
+                logger.info(f'{member} responded "{response_type}" to attendance (no role)')
         except Exception as e:
             logger.error(f"Error handling attendance button: {e}")
+            await interaction.response.send_message(
+                "❌ An error occurred. Please try again.",
+                ephemeral=True
+            )
+    
+    async def _handle_plus_one(self, interaction: discord.Interaction):
+        """Handle +1 button clicks."""
+        try:
+            member = interaction.user
+            
+            # Toggle plus one status in database
+            if self.thread_id:
+                new_status = await database.toggle_plus_one(
+                    thread_id=self.thread_id,
+                    user_id=member.id
+                )
+                
+                if new_status:
+                    await interaction.response.send_message(
+                        "➕ Thanks for letting us know you're bringing a +1!",
+                        ephemeral=True
+                    )
+                    logger.info(f'{member} is bringing a +1')
+                else:
+                    await interaction.response.send_message(
+                        "❌ +1 removed.",
+                        ephemeral=True
+                    )
+                    logger.info(f'{member} removed +1')
+            else:
+                await interaction.response.send_message(
+                    "➕ Thanks for letting us know you're bringing a +1!",
+                    ephemeral=True
+                )
+                logger.info(f'{member} indicated they are bringing a +1 (no tracking)')
+        except Exception as e:
+            logger.error(f"Error handling +1 button: {e}")
             await interaction.response.send_message(
                 "❌ An error occurred. Please try again.",
                 ephemeral=True
@@ -359,13 +425,25 @@ async def create_event(
             await poll_msg.pin()
             logger.info(f'Poll created with {len(poll_dates)} date options')
         
-        # If event role exists, add attendance buttons
-        if event_role:
-            attendance_view = AttendanceView(event_role.id)
-            await thread.send(
-                "**Will you be attending?**\nClick a button below to let us know!",
-                view=attendance_view
-            )
+        # Always show attendance buttons (with or without role)
+        attendance_embed = discord.Embed(
+            title="📋 Will you be attending?",
+            description="Let us know if you'll be there!",
+            color=discord.Color.blurple()
+        )
+        attendance_embed.add_field(
+            name="Options",
+            value="✅ **Yes** - I'll be there!\n❓ **Maybe** - I might attend\n❌ **No** - I can't make it\n➕ **+1** - I'm bringing a guest",
+            inline=False
+        )
+        
+        attendance_view = AttendanceView(
+            event_role_id=event_role.id if event_role else None,
+            thread_id=thread.id
+        )
+        attendance_msg = await thread.send(embed=attendance_embed, view=attendance_view)
+        await attendance_msg.pin()
+        logger.info('Attendance message sent and pinned')
         
         # Save to database
         # For TBD events, use a far future date as placeholder
@@ -386,14 +464,16 @@ async def create_event(
             if is_tbd:
                 ping_msg = await events_channel.send(
                     f"@everyone\n🎉 New event: **{event_name}** - Date TBD!\n"
-                    f"Check out {thread.mention} to vote on the date!"
+                    f"Check out {thread.mention} to vote on the date!",
+                    delete_after=57600  # 16 hours
                 )
             else:
                 ping_msg = await events_channel.send(
                     f"@everyone\n🎉 New event: **{event_name}** on {parsed_date.strftime('%B %d, %Y')}!\n"
-                    f"Check out {thread.mention} for details!"
+                    f"Check out {thread.mention} for details!",
+                    delete_after=57600  # 16 hours
                 )
-            logger.info(f'@everyone ping sent for event "{event_name}"')
+            logger.info(f'@everyone ping sent for event "{event_name}" (will delete after 16 hours)')
         
         # Keep the initial message so the thread remains visible in the channel
         # Don't delete it
@@ -682,9 +762,14 @@ async def finalize_date(interaction: discord.Interaction, chosen_date: str):
     description="Update the event date and time (Author only)"
 )
 @app_commands.describe(
-    new_date="The new date for the event (YYYY-MM-DD HH:MM)"
+    new_date="The new date for the event (YYYY-MM-DD HH:MM)",
+    ping_participants="Notify participants about the date change?"
 )
-async def update_date(interaction: discord.Interaction, new_date: str):
+@app_commands.choices(ping_participants=[
+    app_commands.Choice(name="Yes", value=1),
+    app_commands.Choice(name="No", value=0)
+])
+async def update_date(interaction: discord.Interaction, new_date: str, ping_participants: app_commands.Choice[int] = None):
     """Update the event date and time."""
     logger.info(f'Update date requested by {interaction.user} in thread {interaction.channel.id}')
     await interaction.response.defer(ephemeral=True)
@@ -750,13 +835,40 @@ async def update_date(interaction: discord.Interaction, new_date: str):
         new_thread_name = f"📅 {event_info['event_name']} - {parsed_date.strftime('%Y-%m-%d')}"
         await interaction.channel.edit(name=new_thread_name)
         
-        # Send announcement
+        # Send announcement in thread
         await interaction.channel.send(
             f"📅 **Date Updated!**\n"
             f"The event date has been changed:\n"
             f"~~{old_date.strftime('%B %d, %Y at %I:%M %p')}~~ → **{parsed_date.strftime('%B %d, %Y at %I:%M %p')}**\n"
             f"Updated by {interaction.user.mention}"
         )
+        
+        # Ping participants if requested
+        if ping_participants and ping_participants.value == 1:
+            # Try to get events channel, fall back to thread parent
+            if EVENTS_CHANNEL_ID and EVENTS_CHANNEL_ID != 0:
+                events_channel = interaction.guild.get_channel(EVENTS_CHANNEL_ID)
+            else:
+                events_channel = interaction.channel.parent
+            
+            if events_channel:
+                # If event role exists, ping it, otherwise just post message
+                if event_info['event_role_id']:
+                    event_role = interaction.guild.get_role(event_info['event_role_id'])
+                    if event_role:
+                        await events_channel.send(
+                            f"{event_role.mention}\n📅 **Date Change:** {event_info['event_name']}\n"
+                            f"New date: **{parsed_date.strftime('%B %d, %Y at %I:%M %p')}**\n"
+                            f"See {interaction.channel.mention} for details!"
+                        )
+                        logger.info(f'Pinged {event_role.name} about date change')
+                else:
+                    await events_channel.send(
+                        f"📅 **Date Change:** {event_info['event_name']}\n"
+                        f"New date: **{parsed_date.strftime('%B %d, %Y at %I:%M %p')}**\n"
+                        f"See {interaction.channel.mention} for details!"
+                    )
+                    logger.info(f'Posted date change announcement (no role to ping)')
         
         logger.info(f'Event "{event_info["event_name"]}" date updated from {old_date} to {parsed_date}')
         
@@ -1054,6 +1166,346 @@ async def reopen_event(interaction: discord.Interaction):
 
 
 @event_group.command(
+    name="attendance",
+    description="Show attendance stats or resend attendance message"
+)
+@app_commands.describe(
+    action="Show stats or resend the attendance message"
+)
+@app_commands.choices(action=[
+    app_commands.Choice(name="Show Stats", value="stats"),
+    app_commands.Choice(name="Resend Message", value="resend")
+])
+async def event_attendance(interaction: discord.Interaction, action: app_commands.Choice[str] = None):
+    """Show attendance statistics or resend attendance message."""
+    logger.info(f'Attendance command requested by {interaction.user} in thread {interaction.channel.id}')
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # Check if this is a thread
+        if not isinstance(interaction.channel, discord.Thread):
+            await interaction.followup.send(
+                "❌ This command can only be used in event threads!",
+                ephemeral=True
+            )
+            return
+        
+        # Get event info from database
+        event_info = await database.get_event_by_thread_id(interaction.channel.id)
+        
+        if not event_info:
+            await interaction.followup.send(
+                "❌ This thread is not associated with an event!",
+                ephemeral=True
+            )
+            return
+        
+        # Default to stats if no action specified
+        action_value = action.value if action else "stats"
+        
+        if action_value == "resend":
+            # Resend attendance message
+            attendance_embed = discord.Embed(
+                title="📋 Will you be attending?",
+                description="Let us know if you'll be there!",
+                color=discord.Color.blurple()
+            )
+            attendance_embed.add_field(
+                name="Options",
+                value="✅ **Yes** - I'll be there!\n❓ **Maybe** - I might attend\n❌ **No** - I can't make it\n➕ **+1** - I'm bringing a guest",
+                inline=False
+            )
+            
+            attendance_view = AttendanceView(
+                event_role_id=event_info['event_role_id'],
+                thread_id=interaction.channel.id
+            )
+            attendance_msg = await interaction.channel.send(embed=attendance_embed, view=attendance_view)
+            await attendance_msg.pin()
+            
+            await interaction.followup.send(
+                "✅ Attendance message resent!",
+                ephemeral=True
+            )
+            logger.info(f'Attendance message resent by {interaction.user}')
+        
+        else:  # stats
+            # Get attendance stats
+            attendance_data = await database.get_attendance_stats(interaction.channel.id)
+            
+            # Organize by response type
+            yes_users = []
+            maybe_users = []
+            no_users = []
+            plus_ones = 0
+            
+            for entry in attendance_data:
+                user = interaction.guild.get_member(entry['user_id'])
+                user_mention = user.mention if user else f"<@{entry['user_id']}>"
+                
+                plus_one_indicator = " (+1)" if entry['plus_one'] else ""
+                
+                if entry['response'] == 'yes':
+                    yes_users.append(user_mention + plus_one_indicator)
+                    if entry['plus_one']:
+                        plus_ones += 1
+                elif entry['response'] == 'maybe':
+                    maybe_users.append(user_mention + plus_one_indicator)
+                    if entry['plus_one']:
+                        plus_ones += 1
+                elif entry['response'] == 'no':
+                    no_users.append(user_mention)
+            
+            # Create stats embed
+            stats_embed = discord.Embed(
+                title=f"📊 Attendance Stats: {event_info['event_name']}",
+                color=discord.Color.green(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            
+            # Summary
+            total_responses = len(attendance_data)
+            stats_embed.add_field(
+                name="📊 Summary",
+                value=f"Total Responses: **{total_responses}**\nPlus Ones: **{plus_ones}**",
+                inline=False
+            )
+            
+            # Yes responses
+            if yes_users:
+                yes_text = "\n".join(yes_users)
+                if len(yes_text) > 1024:
+                    yes_text = yes_text[:1020] + "..."
+                stats_embed.add_field(
+                    name=f"✅ Yes ({len(yes_users)})",
+                    value=yes_text,
+                    inline=False
+                )
+            else:
+                stats_embed.add_field(
+                    name="✅ Yes (0)",
+                    value="*No responses yet*",
+                    inline=False
+                )
+            
+            # Maybe responses
+            if maybe_users:
+                maybe_text = "\n".join(maybe_users)
+                if len(maybe_text) > 1024:
+                    maybe_text = maybe_text[:1020] + "..."
+                stats_embed.add_field(
+                    name=f"❓ Maybe ({len(maybe_users)})",
+                    value=maybe_text,
+                    inline=False
+                )
+            else:
+                stats_embed.add_field(
+                    name="❓ Maybe (0)",
+                    value="*No responses yet*",
+                    inline=False
+                )
+            
+            # No responses
+            if no_users:
+                no_text = "\n".join(no_users)
+                if len(no_text) > 1024:
+                    no_text = no_text[:1020] + "..."
+                stats_embed.add_field(
+                    name=f"❌ No ({len(no_users)})",
+                    value=no_text,
+                    inline=False
+                )
+            else:
+                stats_embed.add_field(
+                    name="❌ No (0)",
+                    value="*No responses yet*",
+                    inline=False
+                )
+            
+            stats_embed.set_footer(text="Use /event attendance action: Resend Message to send a new attendance form")
+            
+            await interaction.followup.send(embed=stats_embed, ephemeral=True)
+            logger.info(f'Attendance stats shown to {interaction.user}')
+    
+    except Exception as e:
+        logger.error(f'Error in event_attendance: {e}', exc_info=True)
+        await interaction.followup.send(
+            f"❌ An error occurred: {str(e)}",
+            ephemeral=True
+        )
+
+
+@event_group.command(
+    name="attendance",
+    description="Show attendance stats or resend attendance message"
+)
+@app_commands.describe(
+    action="Show stats or resend the attendance message"
+)
+@app_commands.choices(action=[
+    app_commands.Choice(name="Show Stats", value="stats"),
+    app_commands.Choice(name="Resend Message", value="resend")
+])
+async def event_attendance(interaction: discord.Interaction, action: app_commands.Choice[str] = None):
+    """Show attendance statistics or resend attendance message."""
+    logger.info(f'Attendance command requested by {interaction.user} in thread {interaction.channel.id}')
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # Check if this is a thread
+        if not isinstance(interaction.channel, discord.Thread):
+            await interaction.followup.send(
+                "❌ This command can only be used in event threads!",
+                ephemeral=True
+            )
+            return
+        
+        # Get event info from database
+        event_info = await database.get_event_by_thread_id(interaction.channel.id)
+        
+        if not event_info:
+            await interaction.followup.send(
+                "❌ This thread is not associated with an event!",
+                ephemeral=True
+            )
+            return
+        
+        # Default to stats if no action specified
+        action_value = action.value if action else "stats"
+        
+        if action_value == "resend":
+            # Resend attendance message
+            attendance_embed = discord.Embed(
+                title="📋 Will you be attending?",
+                description="Let us know if you'll be there!",
+                color=discord.Color.blurple()
+            )
+            attendance_embed.add_field(
+                name="Options",
+                value="✅ **Yes** - I'll be there!\n❓ **Maybe** - I might attend\n❌ **No** - I can't make it\n➕ **+1** - I'm bringing a guest",
+                inline=False
+            )
+            
+            attendance_view = AttendanceView(
+                event_role_id=event_info['event_role_id'],
+                thread_id=interaction.channel.id
+            )
+            attendance_msg = await interaction.channel.send(embed=attendance_embed, view=attendance_view)
+            await attendance_msg.pin()
+            
+            await interaction.followup.send(
+                "✅ Attendance message resent!",
+                ephemeral=True
+            )
+            logger.info(f'Attendance message resent by {interaction.user}')
+        
+        else:  # stats
+            # Get attendance stats
+            attendance_data = await database.get_attendance_stats(interaction.channel.id)
+            
+            # Organize by response type
+            yes_users = []
+            maybe_users = []
+            no_users = []
+            plus_ones = 0
+            
+            for entry in attendance_data:
+                user = interaction.guild.get_member(entry['user_id'])
+                user_mention = user.mention if user else f"<@{entry['user_id']}>"
+                
+                plus_one_indicator = " (+1)" if entry['plus_one'] else ""
+                
+                if entry['response'] == 'yes':
+                    yes_users.append(user_mention + plus_one_indicator)
+                    if entry['plus_one']:
+                        plus_ones += 1
+                elif entry['response'] == 'maybe':
+                    maybe_users.append(user_mention + plus_one_indicator)
+                    if entry['plus_one']:
+                        plus_ones += 1
+                elif entry['response'] == 'no':
+                    no_users.append(user_mention)
+            
+            # Create stats embed
+            stats_embed = discord.Embed(
+                title=f"📊 Attendance Stats: {event_info['event_name']}",
+                color=discord.Color.green(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            
+            # Summary
+            total_responses = len(attendance_data)
+            stats_embed.add_field(
+                name="📊 Summary",
+                value=f"Total Responses: **{total_responses}**\nPlus Ones: **{plus_ones}**",
+                inline=False
+            )
+            
+            # Yes responses
+            if yes_users:
+                yes_text = "\n".join(yes_users)
+                if len(yes_text) > 1024:
+                    yes_text = yes_text[:1020] + "..."
+                stats_embed.add_field(
+                    name=f"✅ Yes ({len(yes_users)})",
+                    value=yes_text,
+                    inline=False
+                )
+            else:
+                stats_embed.add_field(
+                    name="✅ Yes (0)",
+                    value="*No responses yet*",
+                    inline=False
+                )
+            
+            # Maybe responses
+            if maybe_users:
+                maybe_text = "\n".join(maybe_users)
+                if len(maybe_text) > 1024:
+                    maybe_text = maybe_text[:1020] + "..."
+                stats_embed.add_field(
+                    name=f"❓ Maybe ({len(maybe_users)})",
+                    value=maybe_text,
+                    inline=False
+                )
+            else:
+                stats_embed.add_field(
+                    name="❓ Maybe (0)",
+                    value="*No responses yet*",
+                    inline=False
+                )
+            
+            # No responses
+            if no_users:
+                no_text = "\n".join(no_users)
+                if len(no_text) > 1024:
+                    no_text = no_text[:1020] + "..."
+                stats_embed.add_field(
+                    name=f"❌ No ({len(no_users)})",
+                    value=no_text,
+                    inline=False
+                )
+            else:
+                stats_embed.add_field(
+                    name="❌ No (0)",
+                    value="*No responses yet*",
+                    inline=False
+                )
+            
+            stats_embed.set_footer(text="Use /event attendance action: Resend Message to send a new attendance form")
+            
+            await interaction.followup.send(embed=stats_embed, ephemeral=True)
+            logger.info(f'Attendance stats shown to {interaction.user}')
+    
+    except Exception as e:
+        logger.error(f'Error in event_attendance: {e}', exc_info=True)
+        await interaction.followup.send(
+            f"❌ An error occurred: {str(e)}",
+            ephemeral=True
+        )
+
+
+@event_group.command(
     name="help",
     description="Show all available event commands"
 )
@@ -1077,7 +1529,8 @@ async def event_help(interaction: discord.Interaction):
         name="📢 Notifications",
         value=(
             "`/event ping` - Notify event participants\n"
-            "`/event pingeveryone` - Ping @everyone in events channel"
+            "`/event pingeveryone` - Ping @everyone in events channel\n"
+            "`/event attendance` - Show attendance stats or resend form"
         ),
         inline=False
     )

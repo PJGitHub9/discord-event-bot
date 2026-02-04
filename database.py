@@ -26,6 +26,19 @@ async def init_database():
                 archived BOOLEAN DEFAULT 0
             )
         """)
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS attendance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                response TEXT NOT NULL,
+                plus_one BOOLEAN DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                UNIQUE(thread_id, user_id)
+            )
+        """)
+        
         await db.commit()
 
 
