@@ -48,6 +48,15 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 # Create command group (add once, before on_ready)
 event_group = app_commands.Group(name="event", description="Event management commands")
 
+# Helper function for logging with context
+def log_event_action(action: str, user, guild, channel, event_name: str = None):
+    """Log an event action with full context."""
+    guild_name = guild.name if guild else "Unknown"
+    channel_name = channel.name if hasattr(channel, 'name') else f"Channel {channel.id}"
+    event_info = f' | Event: "{event_name}"' if event_name else ''
+    logger.info(f'[{guild_name}] [{channel_name}] {action} by {user}{event_info}')
+
+
 # Attendance Button View
 class AttendanceView(View):
     def __init__(self, event_role_id: int = None, thread_id: int = None):
@@ -243,8 +252,14 @@ async def create_event(
     poll_date_4: str = None
 ):
     """Create a new event thread with the specified parameters."""
-    logger.info(f'Event creation requested by {interaction.user} (ID: {interaction.user.id})')
-    logger.info(f'  Event: "{event_name}" | Date: {event_date} | Reminder: {reminder_days} days')
+    log_event_action(
+        f'Event creation requested',
+        interaction.user,
+        interaction.guild,
+        interaction.channel,
+        event_name
+    )
+    logger.info(f'  Date: {event_date} | Reminder: {reminder_days} days')
     
     # Defer the response as this might take a while
     await interaction.response.defer(ephemeral=True)
@@ -507,7 +522,6 @@ async def create_event(
 )
 async def ping_event(interaction: discord.Interaction):
     """Ping the event role in the main channel."""
-    logger.info(f'Ping event requested by {interaction.user} in thread {interaction.channel.id}')
     await interaction.response.defer(ephemeral=True)
     
     try:
@@ -528,6 +542,9 @@ async def ping_event(interaction: discord.Interaction):
                 ephemeral=True
             )
             return
+        
+        # Log with context
+        log_event_action('Ping event', interaction.user, interaction.guild, interaction.channel, event_info['event_name'])
         
         # Check if user is the author
         author_role = interaction.guild.get_role(event_info['author_role_id'])
@@ -771,8 +788,12 @@ async def finalize_date(interaction: discord.Interaction, chosen_date: str):
 ])
 async def update_date(interaction: discord.Interaction, new_date: str, ping_participants: app_commands.Choice[int] = None):
     """Update the event date and time."""
-    logger.info(f'Update date requested by {interaction.user} in thread {interaction.channel.id}')
     await interaction.response.defer(ephemeral=True)
+    
+    # Get event info for logging
+    event_info = await database.get_event_by_thread_id(interaction.channel.id)
+    event_name = event_info['event_name'] if event_info else None
+    log_event_action('Update date', interaction.user, interaction.guild, interaction.channel, event_name)
     
     try:
         # Check if this is a thread
@@ -1071,8 +1092,12 @@ async def cancel_event(interaction: discord.Interaction):
 )
 async def reopen_event(interaction: discord.Interaction):
     """Reopen a cancelled event."""
-    logger.info(f'Reopen event requested by {interaction.user} in thread {interaction.channel.id}')
     await interaction.response.defer(ephemeral=True)
+    
+    # Get event info for logging
+    event_info = await database.get_event_by_thread_id(interaction.channel.id)
+    event_name = event_info['event_name'] if event_info else None
+    log_event_action('Reopen event', interaction.user, interaction.guild, interaction.channel, event_name)
     
     try:
         # Check if this is a thread
@@ -1178,8 +1203,12 @@ async def reopen_event(interaction: discord.Interaction):
 ])
 async def event_attendance(interaction: discord.Interaction, action: app_commands.Choice[str] = None):
     """Show attendance statistics or resend attendance message."""
-    logger.info(f'Attendance command requested by {interaction.user} in thread {interaction.channel.id}')
     await interaction.response.defer(ephemeral=True)
+    
+    # Get event info for logging
+    event_info = await database.get_event_by_thread_id(interaction.channel.id) if isinstance(interaction.channel, discord.Thread) else None
+    event_name = event_info['event_name'] if event_info else None
+    log_event_action('Attendance command', interaction.user, interaction.guild, interaction.channel, event_name)
     
     try:
         # Check if this is a thread
@@ -1204,6 +1233,15 @@ async def event_attendance(interaction: discord.Interaction, action: app_command
         action_value = action.value if action else "stats"
         
         if action_value == "resend":
+            # Check if user is the author (resend is author-only)
+            author_role = interaction.guild.get_role(event_info['author_role_id'])
+            if author_role not in interaction.user.roles:
+                await interaction.followup.send(
+                    "❌ Only the event author can resend the attendance message!",
+                    ephemeral=True
+                )
+                return
+            
             # Resend attendance message
             attendance_embed = discord.Embed(
                 title="📋 Will you be attending?",
@@ -1397,8 +1435,12 @@ async def event_help(interaction: discord.Interaction):
 )
 async def close_event(interaction: discord.Interaction):
     """Close and archive an event thread."""
-    logger.info(f'Close event requested by {interaction.user} in thread {interaction.channel.id}')
     await interaction.response.defer(ephemeral=True)
+    
+    # Get event info for logging
+    event_info = await database.get_event_by_thread_id(interaction.channel.id)
+    event_name = event_info['event_name'] if event_info else None
+    log_event_action('Close event', interaction.user, interaction.guild, interaction.channel, event_name)
     
     try:
         # Check if this is a thread
