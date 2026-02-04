@@ -1,6 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from discord.ui import View, Button
 import os
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
@@ -46,6 +47,71 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Create command group (add once, before on_ready)
 event_group = app_commands.Group(name="event", description="Event management commands")
+
+# Attendance Button View
+class AttendanceView(View):
+    def __init__(self, event_role_id: int):
+        super().__init__(timeout=None)  # Buttons don't expire
+        self.event_role_id = event_role_id
+    
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.green, custom_id="attend_yes", emoji="✅")
+    async def yes_button(self, interaction: discord.Interaction, button: Button):
+        await self._handle_attendance(interaction, True)
+    
+    @discord.ui.button(label="Maybe", style=discord.ButtonStyle.gray, custom_id="attend_maybe", emoji="❓")
+    async def maybe_button(self, interaction: discord.Interaction, button: Button):
+        await self._handle_attendance(interaction, True)
+    
+    @discord.ui.button(label="No", style=discord.ButtonStyle.red, custom_id="attend_no", emoji="❌")
+    async def no_button(self, interaction: discord.Interaction, button: Button):
+        await self._handle_attendance(interaction, False)
+    
+    async def _handle_attendance(self, interaction: discord.Interaction, should_add_role: bool):
+        """Handle attendance button clicks."""
+        try:
+            if not self.event_role_id:
+                await interaction.response.send_message("No event role configured for this event.", ephemeral=True)
+                return
+            
+            event_role = interaction.guild.get_role(self.event_role_id)
+            if not event_role:
+                await interaction.response.send_message("Event role not found.", ephemeral=True)
+                return
+            
+            member = interaction.user
+            
+            if should_add_role:
+                if event_role not in member.roles:
+                    await member.add_roles(event_role)
+                    await interaction.response.send_message(
+                        f"✅ You've been added to {event_role.mention}! You'll be notified about updates.",
+                        ephemeral=True
+                    )
+                    logger.info(f'{member} joined event via button (added role: {event_role.name})')
+                else:
+                    await interaction.response.send_message(
+                        f"You already have the {event_role.mention} role!",
+                        ephemeral=True
+                    )
+            else:
+                if event_role in member.roles:
+                    await member.remove_roles(event_role)
+                    await interaction.response.send_message(
+                        f"❌ You've been removed from {event_role.mention}.",
+                        ephemeral=True
+                    )
+                    logger.info(f'{member} left event via button (removed role: {event_role.name})')
+                else:
+                    await interaction.response.send_message(
+                        "Thanks for letting us know!",
+                        ephemeral=True
+                    )
+        except Exception as e:
+            logger.error(f"Error handling attendance button: {e}")
+            await interaction.response.send_message(
+                "❌ An error occurred. Please try again.",
+                ephemeral=True
+            )
 
 
 @bot.event
@@ -224,54 +290,51 @@ async def create_event(
             auto_archive_duration=10080  # 7 days
         )
         
-        # Build event announcement message
-        announcement_parts = [
-            f"# 🎉 {event_name}",
-            f"",
-        ]
+# Build event announcement embed
+        embed = discord.Embed(
+            title=f"🎉 {event_name}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc)
+        )
         
         if is_tbd:
-            announcement_parts.append(f"📅 **Date:** TBD - Vote on the poll below!")
+            embed.add_field(
+                name="📅 Date",
+                value="TBD - Vote on the poll below!",
+                inline=False
+            )
         else:
-            announcement_parts.append(f"📅 **Date:** {parsed_date.strftime('%B %d, %Y at %I:%M %p')}")
+            embed.add_field(
+                name="📅 Date",
+                value=parsed_date.strftime('%B %d, %Y at %I:%M %p'),
+                inline=False
+            )
         
-        announcement_parts.extend([
-            f"👤 **Organized by:** {author.mention}",
-            f""
-        ])
+        embed.add_field(
+            name="👤 Organized by",
+            value=author.mention,
+            inline=False
+        )
         
         if event_role:
-            announcement_parts.append(f"🏷️ **Role:** {event_role.mention} - React below to join!")
+            embed.add_field(
+                name="🏷️ Event Role",
+                value=event_role.mention,
+                inline=False
+            )
         
         if not is_tbd and reminder_days > 0:
             reminder_date = parsed_date - timedelta(days=reminder_days)
-            announcement_parts.append(f"⏰ **Reminder:** {reminder_days} day(s) before ({reminder_date.strftime('%B %d, %Y')})")
+            embed.add_field(
+                name="⏰ Reminder",
+                value=f"{reminder_days} day(s) before ({reminder_date.strftime('%B %d, %Y')})",
+                inline=False
+            )
         
-        announcement_parts.extend([
-            f"",
-            f"━━━━━━━━━━━━━━━━━━━━━",
-            f"",
-            f"Use this thread to discuss the event!",
-            f"Author can use `/event ping` to notify participants (or post update).",
-            f"Author can use `/event pingeveryone` to ping @ everyone if needed.",
-        ])
+        embed.set_footer(text="Use /event help to see available commands")
         
-        if is_tbd:
-            announcement_parts.append(f"Author can use `/event finalize` to set the final date after voting.")
-        else:
-            announcement_parts.append(f"Author can use `/event updatedate` to change the event date.")
-        
-        announcement_parts.extend([
-            f"Author can use `/event updatetitle` to change the event name.",
-            f"Author can use `/event cancel` to cancel the event.",
-            f"Anyone can use `/event reopen` to reopen a cancelled event.",
-            f"Author can use `/event close` to close this thread."
-        ])
-        
-        announcement_message = "\n".join(announcement_parts)
-        
-        # Send announcement in thread
-        await thread.send(announcement_message)
+        # Send announcement embed in thread
+        await thread.send(embed=embed)
         
         # Create poll if TBD
         if is_tbd:
@@ -296,11 +359,13 @@ async def create_event(
             await poll_msg.pin()
             logger.info(f'Poll created with {len(poll_dates)} date options')
         
-        # If event role exists, add reaction for users to join
+        # If event role exists, add attendance buttons
         if event_role:
-            msg = await thread.send("React with ✅ to get the event role and be notified!")
-            await msg.add_reaction("✅")
-            await msg.pin()
+            attendance_view = AttendanceView(event_role.id)
+            await thread.send(
+                "**Will you be attending?**\nClick a button below to let us know!",
+                view=attendance_view
+            )
         
         # Save to database
         # For TBD events, use a far future date as placeholder
@@ -989,6 +1054,61 @@ async def reopen_event(interaction: discord.Interaction):
 
 
 @event_group.command(
+    name="help",
+    description="Show all available event commands"
+)
+async def event_help(interaction: discord.Interaction):
+    """Display help information for all event commands."""
+    await interaction.response.defer(ephemeral=True)
+    
+    embed = discord.Embed(
+        title="📋 Event Bot Commands",
+        description="All commands start with `/event`",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(
+        name="📅 Event Creation",
+        value="`/event create` - Create a new event with date/poll options",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📢 Notifications",
+        value=(
+            "`/event ping` - Notify event participants\n"
+            "`/event pingeveryone` - Ping @everyone in events channel"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="✏️ Event Management",
+        value=(
+            "`/event updatedate` - Change the event date\n"
+            "`/event updatetitle` - Change the event name\n"
+            "`/event finalize` - Set final date (for TBD events)"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🔧 Event Status",
+        value=(
+            "`/event cancel` - Cancel event (keeps roles for reopening)\n"
+            "`/event reopen` - Reopen a cancelled event (anyone can do this)\n"
+            "`/event close` - Close thread and remove all roles"
+        ),
+        inline=False
+    )
+    
+    embed.set_footer(text="For detailed help on a specific command, use /event <command> and check the options")
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    logger.info(f'{interaction.user} requested event help')
+
+
+@event_group.command(
     name="close",
     description="Close the event thread (Author only)"
 )
@@ -1086,7 +1206,9 @@ async def close_event(interaction: discord.Interaction):
 
 @bot.event
 async def on_raw_reaction_add(payload):
-    """Handle reactions for role assignment."""
+    """Handle reactions for role assignment (legacy - now using buttons)."""
+    # Note: This is kept for backwards compatibility with old events that used reactions
+    # New events use the attendance button view instead
     # Ignore bot reactions
     if payload.user_id == bot.user.id:
         return
@@ -1108,7 +1230,7 @@ async def on_raw_reaction_add(payload):
         
         if member and event_role:
             await member.add_roles(event_role)
-            logger.info(f'{member} joined event "{event_info["event_name"]}" (added role: {event_role.name})')
+            logger.info(f'{member} joined event "{event_info["event_name"]}" (added role: {event_role.name} via reaction)')
             
             # Send confirmation in thread
             channel = bot.get_channel(payload.channel_id)
@@ -1126,7 +1248,8 @@ async def on_raw_reaction_add(payload):
 
 @bot.event
 async def on_raw_reaction_remove(payload):
-    """Handle reaction removal for role removal."""
+    """Handle reaction removal for role removal (legacy - now using buttons)."""
+    # Note: This is kept for backwards compatibility with old events that used reactions
     try:
         # Get event info
         event_info = await database.get_event_by_thread_id(payload.channel_id)
@@ -1144,7 +1267,7 @@ async def on_raw_reaction_remove(payload):
         
         if member and event_role:
             await member.remove_roles(event_role)
-            logger.info(f'{member} left event "{event_info["event_name"]}" (removed role: {event_role.name})')
+            logger.info(f'{member} left event "{event_info["event_name"]}" (removed role: {event_role.name} via reaction)')
                 
     except Exception as e:
         logger.error(f"Error in on_raw_reaction_remove: {e}")
