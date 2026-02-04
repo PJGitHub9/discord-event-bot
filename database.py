@@ -135,8 +135,69 @@ async def get_past_events() -> List[Dict]:
 async def delete_event(thread_id: int):
     """Delete an event from the database."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute(
-            "DELETE FROM events WHERE thread_id = ?",
-            (thread_id,)
-        )
+        await db.execute("DELETE FROM events WHERE thread_id = ?", (thread_id,))
+        await db.execute("DELETE FROM attendance WHERE thread_id = ?", (thread_id,))
         await db.commit()
+
+
+async def record_attendance(thread_id: int, user_id: int, response: str):
+    """Record or update a user's attendance response."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            INSERT INTO attendance (thread_id, user_id, response, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(thread_id, user_id) 
+            DO UPDATE SET response = ?, updated_at = ?
+        """, (
+            thread_id,
+            user_id,
+            response,
+            datetime.now().isoformat(),
+            response,
+            datetime.now().isoformat()
+        ))
+        await db.commit()
+
+
+async def toggle_plus_one(thread_id: int, user_id: int) -> bool:
+    """Toggle plus one status for a user. Returns new plus_one status."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        # Get current plus_one status
+        async with db.execute(
+            "SELECT plus_one FROM attendance WHERE thread_id = ? AND user_id = ?",
+            (thread_id, user_id)
+        ) as cursor:
+            row = await cursor.fetchone()
+            current_status = row[0] if row else 0
+        
+        # Toggle it
+        new_status = 0 if current_status else 1
+        
+        # Update or insert
+        await db.execute("""
+            INSERT INTO attendance (thread_id, user_id, response, plus_one, updated_at)
+            VALUES (?, ?, 'yes', ?, ?)
+            ON CONFLICT(thread_id, user_id) 
+            DO UPDATE SET plus_one = ?, updated_at = ?
+        """, (
+            thread_id,
+            user_id,
+            new_status,
+            datetime.now().isoformat(),
+            new_status,
+            datetime.now().isoformat()
+        ))
+        await db.commit()
+        return bool(new_status)
+
+
+async def get_attendance_stats(thread_id: int) -> List[Dict]:
+    """Get attendance statistics for an event."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM attendance WHERE thread_id = ? ORDER BY response, user_id",
+            (thread_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
