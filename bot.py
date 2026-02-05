@@ -1222,15 +1222,6 @@ async def event_attendance(interaction: discord.Interaction):
             )
             return
         
-        # Check if user is the author (resend is author-only)
-        author_role = interaction.guild.get_role(event_info['author_role_id'])
-        if author_role not in interaction.user.roles:
-            await interaction.followup.send(
-                "❌ Only the event author can resend the attendance message!",
-                ephemeral=True
-            )
-            return
-        
         # Get attendance stats
         attendance_data = await database.get_attendance_stats(interaction.channel.id)
         
