@@ -684,9 +684,10 @@ async def ping_event(interaction: discord.Interaction):
         
         ping_msg = await events_channel.send(
             f"{mention_text}"
-            f"📢 **{event_info['event_name']}** - Check {interaction.channel.mention} for updates!"
+            f"📢 **{event_info['event_name']}** - Check {interaction.channel.mention} for updates!",
+            delete_after=43200  # 12 hours
         )
-        logger.info(f'Event pinged for "{event_info["event_name"]}" by {interaction.user} (role: {"Yes" if mention_text else "No"})')
+        logger.info(f'Event pinged for "{event_info["event_name"]}" by {interaction.user} (role: {"Yes" if mention_text else "No"}) - will delete after 12 hours')
         
         # Respond immediately
         if mention_text:
@@ -769,9 +770,10 @@ async def ping_everyone(interaction: discord.Interaction):
         
         ping_msg = await events_channel.send(
             f"@everyone\n"
-            f"📢 **{event_info['event_name']}** - Check {interaction.channel.mention} for updates!"
+            f"📢 **{event_info['event_name']}** - Check {interaction.channel.mention} for updates!",
+            delete_after=43200  # 12 hours
         )
-        logger.info(f'@everyone pinged for "{event_info["event_name"]}" by {interaction.user}')
+        logger.info(f'@everyone pinged for "{event_info["event_name"]}" by {interaction.user} - will delete after 12 hours')
         
         # Respond immediately
         await interaction.followup.send(
