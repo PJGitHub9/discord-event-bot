@@ -301,6 +301,126 @@ class AttendanceView(View):
             )
 
 
+class ClosePromptView(discord.ui.View):
+    """View with buttons for close event prompt."""
+    def __init__(self, thread_id: int, event_name: str, author_id: int):
+        super().__init__(timeout=None)
+        self.thread_id = thread_id
+        self.event_name = event_name
+        self.author_id = author_id
+    
+    @discord.ui.button(label="Yes, Close Event", style=discord.ButtonStyle.green, custom_id="close_yes", emoji="✅")
+    async def yes_button(self, interaction: discord.Interaction, button: Button):
+        """Handle Yes button - close the event."""
+        # Check if user is the author
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ Only the event author can respond to this prompt.",
+                ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer()
+        
+        try:
+            # Get event info
+            event_info = await database.get_event_by_thread_id(self.thread_id)
+            if not event_info:
+                await interaction.followup.send("Event not found in database.", ephemeral=True)
+                return
+            
+            guild = interaction.guild
+            channel = interaction.channel
+            
+            log_event_action('Automated close (prompt accepted)', interaction.user, guild, channel, self.event_name)
+            
+            # Mark as archived
+            await database.archive_event(self.thread_id)
+            logger.info(f'Event marked as archived: "{self.event_name}"')
+            
+            # Remove and delete author role
+            author_role = guild.get_role(event_info['author_role_id'])
+            if author_role:
+                member_count = len(author_role.members)
+                for member in author_role.members:
+                    await member.remove_roles(author_role)
+                await author_role.delete(reason=f"Event closed: {self.event_name}")
+                logger.info(f'Author role deleted: {author_role.name} (removed from {member_count} member(s))')
+            
+            # Remove and delete event role
+            if event_info['event_role_id']:
+                event_role = guild.get_role(event_info['event_role_id'])
+                if event_role:
+                    member_count = len(event_role.members)
+                    for member in event_role.members:
+                        await member.remove_roles(event_role)
+                    await event_role.delete(reason=f"Event closed: {self.event_name}")
+                    logger.info(f'Event role deleted: {event_role.name} (removed from {member_count} member(s))')
+            
+            # Send closing message
+            await channel.send(
+                f"🔒 **Event Closed**\n"
+                f"This event has been closed automatically after the close prompt.\n"
+                f"The thread will remain available for reference.\n"
+                f"Event roles have been removed from all participants."
+            )
+            
+            # Delete the prompt message
+            await interaction.message.delete()
+            
+            logger.info(f'✅ Event "{self.event_name}" closed via automated prompt')
+            
+        except Exception as e:
+            logger.error(f"Error closing event from prompt: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ An error occurred: {str(e)}", ephemeral=True)
+    
+    @discord.ui.button(label="No, Keep Open", style=discord.ButtonStyle.red, custom_id="close_no", emoji="❌")
+    async def no_button(self, interaction: discord.Interaction, button: Button):
+        """Handle No button - keep event open."""
+        # Check if user is the author
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ Only the event author can respond to this prompt.",
+                ephemeral=True
+            )
+            return
+        
+        try:
+            # Get event info to check prompt count
+            event_info = await database.get_event_by_thread_id(self.thread_id)
+            if not event_info:
+                await interaction.response.send_message("Event not found in database.", ephemeral=True)
+                return
+            
+            prompt_count = event_info.get('close_prompt_count', 0)
+            guild = interaction.guild
+            channel = interaction.channel
+            
+            if prompt_count >= 2:
+                # This was the final prompt
+                await interaction.response.send_message(
+                    f"✅ Okay! This event will remain open.\n"
+                    f"You can close it manually anytime with `/event close`."
+                )
+                logger.info(f'[{guild.name}] [{channel.name}] Close prompt declined (final) | Event: "{self.event_name}"')
+            else:
+                # Will ask again in 24 hours
+                await interaction.response.send_message(
+                    f"✅ Okay! I'll ask again in 24 hours."
+                )
+                logger.info(f'[{guild.name}] [{channel.name}] Close prompt declined (will retry) | Event: "{self.event_name}"')
+            
+            # Delete the prompt message
+            await interaction.message.delete()
+            
+        except Exception as e:
+            logger.error(f"Error handling close prompt decline: {e}", exc_info=True)
+            await interaction.response.send_message(
+                "❌ An error occurred. Please try again.",
+                ephemeral=True
+            )
+
+
 @bot.event
 async def on_ready():
     """Called when the bot is ready."""
@@ -325,6 +445,8 @@ async def on_ready():
         cleanup_old_events.start()
     if not cleanup_non_thread_messages.is_running():
         cleanup_non_thread_messages.start()
+    if not check_close_prompts.is_running():
+        check_close_prompts.start()
     logger.info('Background tasks started')
 
 
@@ -1553,73 +1675,6 @@ async def close_event(interaction: discord.Interaction):
         )
 
 
-@bot.event
-async def on_raw_reaction_add(payload):
-    """Handle reactions for role assignment (legacy - now using buttons)."""
-    # Note: This is kept for backwards compatibility with old events that used reactions
-    # New events use the attendance button view instead
-    # Ignore bot reactions
-    if payload.user_id == bot.user.id:
-        return
-    
-    try:
-        # Get event info
-        event_info = await database.get_event_by_thread_id(payload.channel_id)
-        if not event_info or not event_info['event_role_id']:
-            return
-        
-        # Check if reaction is ✅
-        if str(payload.emoji) != "✅":
-            return
-        
-        # Get guild, member, and role
-        guild = bot.get_guild(payload.guild_id)
-        member = guild.get_member(payload.user_id)
-        event_role = guild.get_role(event_info['event_role_id'])
-        
-        if member and event_role:
-            await member.add_roles(event_role)
-            logger.info(f'{member} joined event "{event_info["event_name"]}" (added role: {event_role.name} via reaction)')
-            
-            # Send confirmation in thread
-            channel = bot.get_channel(payload.channel_id)
-            try:
-                await channel.send(
-                    f"✅ {member.mention} joined the event!",
-                    delete_after=10
-                )
-            except:
-                pass
-                
-    except Exception as e:
-        logger.error(f"Error in on_raw_reaction_add: {e}")
-
-
-@bot.event
-async def on_raw_reaction_remove(payload):
-    """Handle reaction removal for role removal (legacy - now using buttons)."""
-    # Note: This is kept for backwards compatibility with old events that used reactions
-    try:
-        # Get event info
-        event_info = await database.get_event_by_thread_id(payload.channel_id)
-        if not event_info or not event_info['event_role_id']:
-            return
-        
-        # Check if reaction is ✅
-        if str(payload.emoji) != "✅":
-            return
-        
-        # Get guild, member, and role
-        guild = bot.get_guild(payload.guild_id)
-        member = guild.get_member(payload.user_id)
-        event_role = guild.get_role(event_info['event_role_id'])
-        
-        if member and event_role:
-            await member.remove_roles(event_role)
-            logger.info(f'{member} left event "{event_info["event_name"]}" (removed role: {event_role.name} via reaction)')
-                
-    except Exception as e:
-        logger.error(f"Error in on_raw_reaction_remove: {e}")
 
 
 @tasks.loop(hours=1)
@@ -1755,6 +1810,73 @@ async def cleanup_non_thread_messages():
                         
     except Exception as e:
         logger.error(f"Error in cleanup_non_thread_messages: {e}", exc_info=True)
+
+
+@tasks.loop(hours=2)
+async def check_close_prompts():
+    """Check for events that need close prompts and send them to authors."""
+    logger.info('Running close prompt check...')
+    try:
+        events = await database.get_events_needing_close_prompt()
+        logger.info(f'Found {len(events)} event(s) needing close prompt')
+        
+        for event in events:
+            try:
+                thread = bot.get_channel(event['thread_id'])
+                if not thread:
+                    logger.warning(f'Thread not found for event "{event["event_name"]}" (ID: {event["thread_id"]})')
+                    continue
+                
+                # Get the author
+                author_role = thread.guild.get_role(event['author_role_id'])
+                if not author_role or not author_role.members:
+                    logger.warning(f'Author role not found or has no members for event "{event["event_name"]}"')
+                    continue
+                
+                author = author_role.members[0]  # Get the first (and should be only) member
+                
+                # Build close prompt message
+                prompt_count = event.get('close_prompt_count', 0)
+                event_date = datetime.fromisoformat(event['event_date'])
+                hours_since = int((datetime.now() - event_date).total_seconds() / 3600)
+                
+                embed = discord.Embed(
+                    title="🔒 Close Event?",
+                    description=(
+                        f"**{event['event_name']}** ended {hours_since} hours ago.\n\n"
+                        f"Would you like to close this event?\n"
+                        f"Click a button below to respond."
+                    ),
+                    color=discord.Color.orange()
+                )
+                
+                if prompt_count == 1:
+                    embed.set_footer(text="This is the final reminder. Clicking 'No' will stop these prompts.")
+                
+                # Create view with buttons
+                view = ClosePromptView(
+                    thread_id=event['thread_id'],
+                    event_name=event['event_name'],
+                    author_id=author.id
+                )
+                
+                # Send prompt message with buttons
+                prompt_msg = await thread.send(
+                    f"{author.mention}",
+                    embed=embed,
+                    view=view
+                )
+                
+                # Update database to track this prompt
+                await database.update_close_prompt(event['thread_id'])
+                
+                logger.info(f'[{thread.guild.name}] [{thread.name}] Close prompt sent (attempt {prompt_count + 1}/2) | Event: "{event["event_name"]}"')
+                
+            except Exception as e:
+                logger.error(f'Error sending close prompt for event "{event["event_name"]}": {e}', exc_info=True)
+                
+    except Exception as e:
+        logger.error(f"Error in check_close_prompts: {e}", exc_info=True)
 
 
 # Run the bot

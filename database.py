@@ -1,5 +1,5 @@
 import aiosqlite
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 import os
 
@@ -23,9 +23,21 @@ async def init_database():
                 reminder_days INTEGER DEFAULT 0,
                 reminder_sent BOOLEAN DEFAULT 0,
                 created_at TEXT NOT NULL,
-                archived BOOLEAN DEFAULT 0
+                archived BOOLEAN DEFAULT 0,
+                close_prompt_count INTEGER DEFAULT 0,
+                last_close_prompt TEXT
             )
         """)
+        
+        # Add new columns if they don't exist (for existing databases)
+        try:
+            await db.execute("ALTER TABLE events ADD COLUMN close_prompt_count INTEGER DEFAULT 0")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE events ADD COLUMN last_close_prompt TEXT")
+        except:
+            pass
         
         await db.execute("""
             CREATE TABLE IF NOT EXISTS attendance (
@@ -201,3 +213,37 @@ async def get_attendance_stats(thread_id: int) -> List[Dict]:
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+
+async def get_events_needing_close_prompt() -> List[Dict]:
+    """Get events that ended 24+ hours ago and need close prompt."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Get events that:
+        # 1. Are not archived
+        # 2. Event date has passed by 24+ hours
+        # 3. close_prompt_count < 2
+        # 4. Either never prompted OR last prompt was 24+ hours ago
+        twenty_four_hours_ago = (datetime.now() - timedelta(hours=24)).isoformat()
+        
+        async with db.execute("""
+            SELECT * FROM events 
+            WHERE archived = 0
+            AND event_date < ?
+            AND (close_prompt_count IS NULL OR close_prompt_count < 2)
+            AND (last_close_prompt IS NULL OR last_close_prompt < ?)
+        """, (twenty_four_hours_ago, twenty_four_hours_ago)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def update_close_prompt(thread_id: int):
+    """Update close prompt tracking."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            UPDATE events 
+            SET close_prompt_count = COALESCE(close_prompt_count, 0) + 1,
+                last_close_prompt = ?
+            WHERE thread_id = ?
+        """, (datetime.now().isoformat(), thread_id))
+        await db.commit()
