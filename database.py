@@ -96,6 +96,17 @@ async def get_event_by_thread_id(thread_id: int) -> Optional[Dict]:
             return None
 
 
+async def get_active_events() -> List[Dict]:
+    """Get all non-archived events."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM events WHERE archived = 0"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
 async def get_events_needing_reminders() -> List[Dict]:
     """Get events that need reminders sent."""
     async with aiosqlite.connect(DATABASE_PATH) as db:

@@ -429,6 +429,18 @@ async def on_ready():
     # Initialize database
     await database.init_database()
     logger.info('Database initialized successfully')
+    # Register persistent AttendanceView instances for active events so
+    # buttons continue to work after bot restarts/resumes.
+    try:
+        active_events = await database.get_active_events()
+        for ev in active_events:
+            try:
+                bot.add_view(AttendanceView(event_role_id=ev.get('event_role_id'), thread_id=ev.get('thread_id')))
+            except Exception as e:
+                logger.error(f"Error adding persistent AttendanceView for thread {ev.get('thread_id')}: {e}")
+        logger.info(f"Registered persistent AttendanceView for {len(active_events)} active event(s)")
+    except Exception as e:
+        logger.error(f"Error loading active events for persistent views: {e}")
     
     # Sync commands globally (works on all servers)
     try:
