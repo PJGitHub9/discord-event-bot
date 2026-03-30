@@ -66,21 +66,27 @@ async def build_attendance_embed(thread_id: int, guild) -> discord.Embed:
     maybe_users = []
     no_users = []
     plus_ones = 0
+    baby_count = 0
     
     for entry in attendance_data:
         user = guild.get_member(entry['user_id'])
         user_mention = user.mention if user else f"<@{entry['user_id']}>"
         
-        plus_one_indicator = " (+1)" if entry['plus_one'] else ""
-        
+        plus_one_indicator = " (+1)" if entry.get('plus_one') else ""
+        baby_indicator = " (👶)" if entry.get('baby') else ""
+
         if entry['response'] == 'yes':
-            yes_users.append(user_mention + plus_one_indicator)
-            if entry['plus_one']:
+            yes_users.append(user_mention + plus_one_indicator + baby_indicator)
+            if entry.get('plus_one'):
                 plus_ones += 1
+            if entry.get('baby'):
+                baby_count += 1
         elif entry['response'] == 'maybe':
-            maybe_users.append(user_mention + plus_one_indicator)
-            if entry['plus_one']:
+            maybe_users.append(user_mention + plus_one_indicator + baby_indicator)
+            if entry.get('plus_one'):
                 plus_ones += 1
+            if entry.get('baby'):
+                baby_count += 1
         elif entry['response'] == 'no':
             no_users.append(user_mention)
     
@@ -95,7 +101,7 @@ async def build_attendance_embed(thread_id: int, guild) -> discord.Embed:
     total_responses = len(attendance_data)
     attendance_embed.add_field(
         name="📊 Summary",
-        value=f"Total Responses: **{total_responses}** | Plus Ones: **{plus_ones}**",
+        value=f"Total Responses: **{total_responses}** | Plus Ones: **{plus_ones}** | Babies: **{baby_count}**",
         inline=False
     )
     
@@ -175,6 +181,10 @@ class AttendanceView(View):
     @discord.ui.button(label="+1", style=discord.ButtonStyle.blurple, custom_id="attend_plus_one", emoji="➕")
     async def plus_one_button(self, interaction: discord.Interaction, button: Button):
         await self._handle_plus_one(interaction)
+
+    @discord.ui.button(label="Baby", style=discord.ButtonStyle.blurple, custom_id="attend_baby", emoji="👶")
+    async def baby_button(self, interaction: discord.Interaction, button: Button):
+        await self._handle_baby(interaction)
     
     async def _handle_attendance(self, interaction: discord.Interaction, should_add_role: bool, response_type: str):
         """Handle attendance button clicks."""
@@ -295,6 +305,50 @@ class AttendanceView(View):
                 logger.info(f'{member} indicated they are bringing a +1 (no tracking)')
         except Exception as e:
             logger.error(f"Error handling +1 button: {e}")
+            await interaction.response.send_message(
+                "❌ An error occurred. Please try again.",
+                ephemeral=True
+            )
+
+    async def _handle_baby(self, interaction: discord.Interaction):
+        """Handle baby button clicks."""
+        try:
+            member = interaction.user
+
+            # Toggle baby status in database
+            if self.thread_id:
+                new_status = await database.toggle_baby(
+                    thread_id=self.thread_id,
+                    user_id=member.id
+                )
+
+                if new_status:
+                    await interaction.response.send_message(
+                        "👶 Thanks for letting us know a baby will attend!",
+                        ephemeral=True
+                    )
+                    logger.info(f'{member} added a baby')
+                else:
+                    await interaction.response.send_message(
+                        "👶 Baby removed.",
+                        ephemeral=True
+                    )
+                    logger.info(f'{member} removed baby')
+
+                # Update the attendance embed
+                try:
+                    updated_embed = await build_attendance_embed(self.thread_id, interaction.guild)
+                    await interaction.message.edit(embed=updated_embed)
+                except Exception as e:
+                    logger.error(f"Error updating attendance embed: {e}")
+            else:
+                await interaction.response.send_message(
+                    "👶 Thanks for letting us know a baby will attend!",
+                    ephemeral=True
+                )
+                logger.info(f'{member} indicated a baby will attend (no tracking)')
+        except Exception as e:
+            logger.error(f"Error handling baby button: {e}")
             await interaction.response.send_message(
                 "❌ An error occurred. Please try again.",
                 ephemeral=True
