@@ -495,6 +495,54 @@ async def on_ready():
         logger.info(f"Registered persistent AttendanceView for {len(active_events)} active event(s)")
     except Exception as e:
         logger.error(f"Error loading active events for persistent views: {e}")
+    # Ensure existing attendance messages get the new Baby button by
+    # editing their message to attach the updated view.
+    try:
+        for ev in active_events:
+            thread_id = ev.get('thread_id')
+            try:
+                thread = bot.get_channel(thread_id)
+                if thread is None:
+                    try:
+                        thread = await bot.fetch_channel(thread_id)
+                    except Exception as e:
+                        logger.error(f"Could not fetch thread {thread_id}: {e}")
+                        continue
+
+                target_msg = None
+                # Check pinned messages first (attendance messages are pinned)
+                try:
+                    pins = await thread.pins()
+                except Exception:
+                    pins = []
+
+                for m in pins:
+                    if m.embeds:
+                        emb = m.embeds[0]
+                        if emb.title and "Will you be attending" in emb.title:
+                            target_msg = m
+                            break
+
+                # Fallback: scan recent history
+                if not target_msg:
+                    async for m in thread.history(limit=50):
+                        if m.embeds:
+                            emb = m.embeds[0]
+                            if emb.title and "Will you be attending" in emb.title:
+                                target_msg = m
+                                break
+
+                if target_msg:
+                    try:
+                        await target_msg.edit(view=AttendanceView(event_role_id=ev.get('event_role_id'), thread_id=thread_id))
+                        await asyncio.sleep(0.25)
+                        logger.info(f"Updated attendance message view for thread {thread_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to edit attendance message in thread {thread_id}: {e}")
+            except Exception as e:
+                logger.error(f"Error processing active event {thread_id}: {e}")
+    except Exception as e:
+        logger.error(f"Error attaching views to existing attendance messages: {e}")
     
     # Sync commands globally (works on all servers)
     try:
