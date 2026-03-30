@@ -221,36 +221,36 @@ async def toggle_plus_one(thread_id: int, user_id: int) -> bool:
         return bool(new_status)
 
 
-    async def toggle_baby(thread_id: int, user_id: int) -> bool:
-        """Toggle baby status for a user. Returns new baby status."""
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            # Get current baby status
-            async with db.execute(
-                "SELECT baby FROM attendance WHERE thread_id = ? AND user_id = ?",
-                (thread_id, user_id)
-            ) as cursor:
-                row = await cursor.fetchone()
-                current_status = row[0] if row else 0
-        
-            # Toggle it
-            new_status = 0 if current_status else 1
-        
-            # Update or insert
-            await db.execute("""
-                INSERT INTO attendance (thread_id, user_id, response, baby, updated_at)
-                VALUES (?, ?, 'yes', ?, ?)
-                ON CONFLICT(thread_id, user_id) 
-                DO UPDATE SET baby = ?, updated_at = ?
-            """, (
-                thread_id,
-                user_id,
-                new_status,
-                datetime.now().isoformat(),
-                new_status,
-                datetime.now().isoformat()
-            ))
-            await db.commit()
-            return bool(new_status)
+async def toggle_baby(thread_id: int, user_id: int) -> bool:
+    """Toggle baby status for a user. Returns new baby status."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        # Get current baby status
+        async with db.execute(
+            "SELECT baby FROM attendance WHERE thread_id = ? AND user_id = ?",
+            (thread_id, user_id)
+        ) as cursor:
+            row = await cursor.fetchone()
+            current_status = row[0] if row else 0
+
+        # Toggle it
+        new_status = 0 if current_status else 1
+
+        # Update or insert
+        await db.execute("""
+            INSERT INTO attendance (thread_id, user_id, response, baby, updated_at)
+            VALUES (?, ?, 'yes', ?, ?)
+            ON CONFLICT(thread_id, user_id) 
+            DO UPDATE SET baby = ?, updated_at = ?
+        """, (
+            thread_id,
+            user_id,
+            new_status,
+            datetime.now().isoformat(),
+            new_status,
+            datetime.now().isoformat()
+        ))
+        await db.commit()
+        return bool(new_status)
 
 
 async def get_attendance_stats(thread_id: int) -> List[Dict]:
