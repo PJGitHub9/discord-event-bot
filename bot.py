@@ -182,7 +182,7 @@ class AttendanceView(View):
     async def plus_one_button(self, interaction: discord.Interaction, button: Button):
         await self._handle_plus_one(interaction)
 
-    @discord.ui.button(label="+👶", style=discord.ButtonStyle.blurple, custom_id="attend_baby", emoji="👶")
+    @discord.ui.button(label="Baby", style=discord.ButtonStyle.blurple, custom_id="attend_baby", emoji="👶")
     async def baby_button(self, interaction: discord.Interaction, button: Button):
         await self._handle_baby(interaction)
     
