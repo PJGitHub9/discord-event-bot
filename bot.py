@@ -937,14 +937,6 @@ async def ping_event(interaction: discord.Interaction):
                 ephemeral=True
             )
         
-        # Delete after 30 seconds to keep channel clean (in background)
-        await asyncio.sleep(30)
-        try:
-            await ping_msg.delete()
-            logger.info(f'Ping message deleted after 30s for "{event_info["event_name"]}"')
-        except:
-            pass
-        
     except Exception as e:
         logger.error(f'Error in ping_event: {e}', exc_info=True)
         await interaction.followup.send(
@@ -1016,14 +1008,6 @@ async def ping_everyone(interaction: discord.Interaction):
             f"✅ Pinged @everyone in {events_channel.mention}!",
             ephemeral=True
         )
-        
-        # Delete after 30 seconds to keep channel clean (in background)
-        await asyncio.sleep(30)
-        try:
-            await ping_msg.delete()
-            logger.info(f'@everyone ping message deleted after 30s for "{event_info["event_name"]}"')
-        except:
-            pass
         
     except Exception as e:
         logger.error(f'Error in ping_everyone: {e}', exc_info=True)
