@@ -1,5 +1,5 @@
 import aiosqlite
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict
 import os
 
@@ -58,6 +58,51 @@ async def init_database():
         except:
             pass
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_settings (
+                guild_id INTEGER PRIMARY KEY,
+                events_channel_id INTEGER,
+                allow_other_channels BOOLEAN DEFAULT 0,
+                events_channel_assigned_at TEXT
+            )
+        """)
+
+        await db.commit()
+
+
+async def get_guild_settings(guild_id: int) -> Dict:
+    """Get settings for a guild, returning defaults if not configured."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM guild_settings WHERE guild_id = ?", (guild_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return dict(row)
+            return {'guild_id': guild_id, 'events_channel_id': None, 'allow_other_channels': 0}
+
+
+async def set_guild_events_channel(guild_id: int, channel_id: int):
+    """Set the events channel for a guild, recording the assignment timestamp."""
+    assigned_at = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            INSERT INTO guild_settings (guild_id, events_channel_id, events_channel_assigned_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET events_channel_id = ?, events_channel_assigned_at = ?
+        """, (guild_id, channel_id, assigned_at, channel_id, assigned_at))
+        await db.commit()
+
+
+async def set_guild_allow_other_channels(guild_id: int, allow: bool):
+    """Set whether events can be created outside the events channel."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            INSERT INTO guild_settings (guild_id, allow_other_channels)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET allow_other_channels = ?
+        """, (guild_id, int(allow), int(allow)))
         await db.commit()
 
 
