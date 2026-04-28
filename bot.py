@@ -128,6 +128,59 @@ class SettingsView(discord.ui.View):
             view=self
         )
 
+    @discord.ui.button(label="📋 View All Events", style=discord.ButtonStyle.blurple, row=2)
+    async def view_all_events(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
+        all_events = await database.get_active_events()
+
+        # Filter to this guild by checking each thread's guild
+        guild_events = []
+        for event in all_events:
+            thread = bot.get_channel(event['thread_id'])
+            if thread and thread.guild.id == interaction.guild_id:
+                guild_events.append((event, thread))
+
+        if not guild_events:
+            await interaction.followup.send("No active events found.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"📋 Active Events ({len(guild_events)})",
+            color=discord.Color.blurple()
+        )
+
+        for event, thread in guild_events:
+            attendance = await database.get_attendance_stats(event['thread_id'])
+            yes_count   = sum(1 for a in attendance if a['response'] == 'yes')
+            maybe_count = sum(1 for a in attendance if a['response'] == 'maybe')
+            no_count    = sum(1 for a in attendance if a['response'] == 'no')
+
+            creator = interaction.guild.get_member(event['author_id'])
+            creator_str = creator.mention if creator else f"<@{event['author_id']}>"
+
+            try:
+                event_date = datetime.fromisoformat(event['event_date'])
+                date_str = "TBD (Poll Active)" if event_date.year == 2099 else event_date.strftime('%b %d, %Y')
+            except Exception:
+                date_str = event['event_date']
+
+            role_str = "✅ Yes" if event['event_role_id'] else "❌ No"
+
+            embed.add_field(
+                name=event['event_name'],
+                value=(
+                    f"📅 {date_str}\n"
+                    f"👤 {creator_str}\n"
+                    f"🏷️ Role: {role_str}\n"
+                    f"✅ {yes_count}  ❓ {maybe_count}  ❌ {no_count}\n"
+                    f"🧵 {thread.mention}"
+                ),
+                inline=True
+            )
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 
 @eventbot_group.command(name="settings", description="Configure the bot (admins only)")
 async def eventbot_settings(interaction: discord.Interaction):
