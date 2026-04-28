@@ -84,31 +84,37 @@ def _build_settings_embed(guild_settings: dict, guild: discord.Guild) -> discord
     return embed
 
 
+class _EventChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Set events channel...",
+            channel_types=[discord.ChannelType.text],
+            row=0
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view: SettingsView = self.view
+        channel = self.values[0]
+        await database.set_guild_events_channel(interaction.guild_id, channel.id)
+        view.guild_settings['events_channel_id'] = channel.id
+        logger.info(f'[{interaction.guild.name}] Events channel set to #{channel.name} by {interaction.user}')
+        await interaction.response.edit_message(
+            embed=_build_settings_embed(view.guild_settings, interaction.guild),
+            view=view
+        )
+
+
 class SettingsView(discord.ui.View):
     def __init__(self, guild_settings: dict):
         super().__init__(timeout=300)
         self.guild_settings = guild_settings
+        self.add_item(_EventChannelSelect())
         self._sync_toggle()
 
     def _sync_toggle(self):
         allow = bool(self.guild_settings.get('allow_other_channels', False))
         self.toggle_other_channels.label = "Other Channels: ON" if allow else "Other Channels: OFF"
         self.toggle_other_channels.style = discord.ButtonStyle.green if allow else discord.ButtonStyle.red
-
-    @discord.ui.channel_select(
-        placeholder="Set events channel...",
-        channel_types=[discord.ChannelType.text],
-        row=0
-    )
-    async def channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
-        channel = select.values[0]
-        await database.set_guild_events_channel(interaction.guild_id, channel.id)
-        self.guild_settings['events_channel_id'] = channel.id
-        logger.info(f'[{interaction.guild.name}] Events channel set to #{channel.name} by {interaction.user}')
-        await interaction.response.edit_message(
-            embed=_build_settings_embed(self.guild_settings, interaction.guild),
-            view=self
-        )
 
     @discord.ui.button(label="Other Channels: OFF", style=discord.ButtonStyle.red, row=1)
     async def toggle_other_channels(self, interaction: discord.Interaction, button: discord.ui.Button):
