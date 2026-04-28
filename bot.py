@@ -155,17 +155,31 @@ class SettingsView(discord.ui.View):
             yes_count   = sum(1 for a in attendance if a['response'] == 'yes')
             maybe_count = sum(1 for a in attendance if a['response'] == 'maybe')
             no_count    = sum(1 for a in attendance if a['response'] == 'no')
+            plus_ones   = sum(1 for a in attendance if a.get('plus_one'))
+            babies      = sum(1 for a in attendance if a.get('baby'))
 
             creator = interaction.guild.get_member(event['author_id'])
             creator_str = creator.mention if creator else f"<@{event['author_id']}>"
 
             try:
                 event_date = datetime.fromisoformat(event['event_date'])
-                date_str = "TBD (Poll Active)" if event_date.year == 2099 else event_date.strftime('%b %d, %Y')
+                if event_date.year == 2099:
+                    date_str = "TBD (Poll Active)"
+                elif event_date.hour == 0 and event_date.minute == 0:
+                    date_str = event_date.strftime('%b %d, %Y')
+                else:
+                    date_str = event_date.strftime('%b %d, %Y at %I:%M %p')
             except Exception:
                 date_str = event['event_date']
 
             role_str = "✅ Yes" if event['event_role_id'] else "❌ No"
+
+            extras = []
+            if plus_ones:
+                extras.append(f"➕ {plus_ones}")
+            if babies:
+                extras.append(f"👶 {babies}")
+            extras_str = ("  " + "  ".join(extras)) if extras else ""
 
             embed.add_field(
                 name=event['event_name'],
@@ -173,7 +187,7 @@ class SettingsView(discord.ui.View):
                     f"📅 {date_str}\n"
                     f"👤 {creator_str}\n"
                     f"🏷️ Role: {role_str}\n"
-                    f"✅ {yes_count}  ❓ {maybe_count}  ❌ {no_count}\n"
+                    f"✅ {yes_count}  ❓ {maybe_count}  ❌ {no_count}{extras_str}\n"
                     f"🧵 {thread.mention}"
                 ),
                 inline=True
