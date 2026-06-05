@@ -45,8 +45,173 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Create command group (add once, before on_ready)
+# Create command groups (add once, before on_ready)
 event_group = app_commands.Group(name="event", description="Event management commands")
+eventbot_group = app_commands.Group(name="eventbot", description="Bot administration")
+
+
+async def get_guild_events_channel_id(guild_id: int) -> int:
+    """Return the configured events channel for a guild, falling back to the env var."""
+    settings = await database.get_guild_settings(guild_id)
+    return settings.get('events_channel_id') or EVENTS_CHANNEL_ID
+
+
+def _build_settings_embed(guild_settings: dict, guild: discord.Guild) -> discord.Embed:
+    db_channel_id = guild_settings.get('events_channel_id')
+    allow_other = bool(guild_settings.get('allow_other_channels', False))
+    effective_id = db_channel_id or EVENTS_CHANNEL_ID
+
+    if effective_id:
+        ch = guild.get_channel(effective_id)
+        channel_value = ch.mention if ch else f"<#{effective_id}>"
+        if not db_channel_id:
+            channel_value += " *(from .env — set one here to override)*"
+    else:
+        channel_value = "*Not set — use the picker below*"
+
+    embed = discord.Embed(title="⚙️ Bot Settings", color=discord.Color.blurple())
+    embed.add_field(name="📢 Events Channel", value=channel_value, inline=False)
+    embed.add_field(
+        name="🔓 Allow Other Channels",
+        value=(
+            "✅ **On** — `/event create` works in any channel (bot won't clean up those channels)"
+            if allow_other else
+            "❌ **Off** — `/event create` is restricted to the events channel"
+        ),
+        inline=False
+    )
+    embed.set_footer(text="Changes apply immediately")
+    return embed
+
+
+class _EventChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Set events channel...",
+            channel_types=[discord.ChannelType.text],
+            row=0
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view: SettingsView = self.view
+        channel = self.values[0]
+        await database.set_guild_events_channel(interaction.guild_id, channel.id)
+        view.guild_settings['events_channel_id'] = channel.id
+        logger.info(f'[{interaction.guild.name}] Events channel set to #{channel.name} by {interaction.user}')
+        await interaction.response.edit_message(
+            embed=_build_settings_embed(view.guild_settings, interaction.guild),
+            view=view
+        )
+
+
+class SettingsView(discord.ui.View):
+    def __init__(self, guild_settings: dict):
+        super().__init__(timeout=300)
+        self.guild_settings = guild_settings
+        self.add_item(_EventChannelSelect())
+        self._sync_toggle()
+
+    def _sync_toggle(self):
+        allow = bool(self.guild_settings.get('allow_other_channels', False))
+        self.toggle_other_channels.label = "Other Channels: ON" if allow else "Other Channels: OFF"
+        self.toggle_other_channels.style = discord.ButtonStyle.green if allow else discord.ButtonStyle.red
+
+    @discord.ui.button(label="Other Channels: OFF", style=discord.ButtonStyle.red, row=1)
+    async def toggle_other_channels(self, interaction: discord.Interaction, button: discord.ui.Button):
+        new_val = not bool(self.guild_settings.get('allow_other_channels', False))
+        await database.set_guild_allow_other_channels(interaction.guild_id, new_val)
+        self.guild_settings['allow_other_channels'] = int(new_val)
+        self._sync_toggle()
+        logger.info(f'[{interaction.guild.name}] allow_other_channels → {new_val} by {interaction.user}')
+        await interaction.response.edit_message(
+            embed=_build_settings_embed(self.guild_settings, interaction.guild),
+            view=self
+        )
+
+    @discord.ui.button(label="📋 View All Events", style=discord.ButtonStyle.blurple, row=2)
+    async def view_all_events(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
+        all_events = await database.get_active_events()
+
+        # Filter to this guild by checking each thread's guild
+        guild_events = []
+        for event in all_events:
+            thread = bot.get_channel(event['thread_id'])
+            if thread and thread.guild.id == interaction.guild_id:
+                guild_events.append((event, thread))
+
+        if not guild_events:
+            await interaction.followup.send("No active events found.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"📋 Active Events ({len(guild_events)})",
+            color=discord.Color.blurple()
+        )
+
+        for event, thread in guild_events:
+            attendance = await database.get_attendance_stats(event['thread_id'])
+            yes_count   = sum(1 for a in attendance if a['response'] == 'yes')
+            maybe_count = sum(1 for a in attendance if a['response'] == 'maybe')
+            no_count    = sum(1 for a in attendance if a['response'] == 'no')
+            plus_ones   = sum(1 for a in attendance if a.get('plus_one'))
+            babies      = sum(1 for a in attendance if a.get('baby'))
+
+            creator = interaction.guild.get_member(event['author_id'])
+            creator_str = creator.mention if creator else f"<@{event['author_id']}>"
+
+            try:
+                event_date = datetime.fromisoformat(event['event_date'])
+                if event_date.year == 2099:
+                    date_str = "TBD (Poll Active)"
+                elif event_date.hour == 0 and event_date.minute == 0:
+                    date_str = event_date.strftime('%b %d, %Y')
+                else:
+                    date_str = event_date.strftime('%b %d, %Y at %I:%M %p')
+            except Exception:
+                date_str = event['event_date']
+
+            role_str = "✅ Yes" if event['event_role_id'] else "❌ No"
+
+            extras = []
+            if plus_ones:
+                extras.append(f"➕ {plus_ones}")
+            if babies:
+                extras.append(f"👶 {babies}")
+            extras_str = ("  " + "  ".join(extras)) if extras else ""
+
+            embed.add_field(
+                name=event['event_name'],
+                value=(
+                    f"📅 {date_str}\n"
+                    f"👤 {creator_str}\n"
+                    f"🏷️ Role: {role_str}\n"
+                    f"✅ {yes_count}  ❓ {maybe_count}  ❌ {no_count}{extras_str}\n"
+                    f"🧵 {thread.mention}"
+                ),
+                inline=True
+            )
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@eventbot_group.command(name="settings", description="Configure the bot (admins only)")
+async def eventbot_settings(interaction: discord.Interaction):
+    if not (interaction.user.guild_permissions.administrator or
+            interaction.user.guild_permissions.manage_guild):
+        await interaction.response.send_message(
+            "❌ You need Administrator or Manage Server permission to change settings.",
+            ephemeral=True
+        )
+        return
+    guild_settings = await database.get_guild_settings(interaction.guild_id)
+    await interaction.response.send_message(
+        embed=_build_settings_embed(guild_settings, interaction.guild),
+        view=SettingsView(guild_settings),
+        ephemeral=True
+    )
+
 
 # Helper function for logging with context
 def log_event_action(action: str, user, guild, channel, event_name: str = None):
@@ -702,12 +867,17 @@ async def create_event(
     await interaction.response.defer(ephemeral=True)
     
     try:
-        # Check if command is used in the events channel
-        # Note: EVENTS_CHANNEL_ID from .env is optional now - bot works on all servers
-        # You can remove this check or set EVENTS_CHANNEL_ID=0 to allow any channel
-        if EVENTS_CHANNEL_ID and interaction.channel_id != EVENTS_CHANNEL_ID:
+        # Check if command is used in an allowed channel
+        guild_settings = await database.get_guild_settings(interaction.guild_id)
+        events_channel_id = guild_settings.get('events_channel_id') or EVENTS_CHANNEL_ID
+        allow_other_channels = bool(guild_settings.get('allow_other_channels', False))
+
+        if events_channel_id and not allow_other_channels and interaction.channel_id != events_channel_id:
+            ch = bot.get_channel(events_channel_id)
+            ch_mention = ch.mention if ch else f"<#{events_channel_id}>"
             await interaction.followup.send(
-                f"❌ This command should be used in your designated events channel!",
+                f"❌ Events can only be created in {ch_mention}.\n"
+                f"An admin can enable other channels via `/eventbot settings`.",
                 ephemeral=True
             )
             return
@@ -995,9 +1165,9 @@ async def ping_event(interaction: discord.Interaction):
             return
         
         # Send ping in main events channel
-        # Use the current channel if EVENTS_CHANNEL_ID is not set
-        if EVENTS_CHANNEL_ID:
-            events_channel = bot.get_channel(EVENTS_CHANNEL_ID)
+        _ch_id = await get_guild_events_channel_id(interaction.guild.id)
+        if _ch_id:
+            events_channel = bot.get_channel(_ch_id)
         else:
             events_channel = interaction.channel.parent if isinstance(interaction.channel, discord.Thread) else interaction.channel
         
@@ -1026,14 +1196,6 @@ async def ping_event(interaction: discord.Interaction):
                 f"✅ Posted update in {events_channel.mention}! (No role to ping)",
                 ephemeral=True
             )
-        
-        # Delete after 30 seconds to keep channel clean (in background)
-        await asyncio.sleep(30)
-        try:
-            await ping_msg.delete()
-            logger.info(f'Ping message deleted after 30s for "{event_info["event_name"]}"')
-        except:
-            pass
         
     except Exception as e:
         logger.error(f'Error in ping_event: {e}', exc_info=True)
@@ -1081,9 +1243,9 @@ async def ping_everyone(interaction: discord.Interaction):
             return
         
         # Send @everyone ping in main events channel
-        # Use the current channel's parent if EVENTS_CHANNEL_ID is not set
-        if EVENTS_CHANNEL_ID:
-            events_channel = bot.get_channel(EVENTS_CHANNEL_ID)
+        _ch_id = await get_guild_events_channel_id(interaction.guild.id)
+        if _ch_id:
+            events_channel = bot.get_channel(_ch_id)
         else:
             events_channel = interaction.channel.parent if isinstance(interaction.channel, discord.Thread) else interaction.channel
         
@@ -1106,14 +1268,6 @@ async def ping_everyone(interaction: discord.Interaction):
             f"✅ Pinged @everyone in {events_channel.mention}!",
             ephemeral=True
         )
-        
-        # Delete after 30 seconds to keep channel clean (in background)
-        await asyncio.sleep(30)
-        try:
-            await ping_msg.delete()
-            logger.info(f'@everyone ping message deleted after 30s for "{event_info["event_name"]}"')
-        except:
-            pass
         
     except Exception as e:
         logger.error(f'Error in ping_everyone: {e}', exc_info=True)
@@ -1315,9 +1469,9 @@ async def update_date(interaction: discord.Interaction, new_date: str, ping_part
         
         # Ping participants if requested
         if ping_participants and ping_participants.value == 1:
-            # Try to get events channel, fall back to thread parent
-            if EVENTS_CHANNEL_ID and EVENTS_CHANNEL_ID != 0:
-                events_channel = interaction.guild.get_channel(EVENTS_CHANNEL_ID)
+            _ch_id = await get_guild_events_channel_id(interaction.guild_id)
+            if _ch_id:
+                events_channel = bot.get_channel(_ch_id)
             else:
                 events_channel = interaction.channel.parent
             
@@ -1494,9 +1648,9 @@ async def cancel_event(interaction: discord.Interaction):
         )
         
         # Ping participants in parent channel
-        # Use the thread's parent channel if EVENTS_CHANNEL_ID is not set
-        if EVENTS_CHANNEL_ID:
-            events_channel = bot.get_channel(EVENTS_CHANNEL_ID)
+        _ch_id = await get_guild_events_channel_id(interaction.guild_id)
+        if _ch_id:
+            events_channel = bot.get_channel(_ch_id)
         else:
             events_channel = interaction.channel.parent if isinstance(interaction.channel, discord.Thread) else interaction.channel
         
@@ -1609,8 +1763,9 @@ async def reopen_event(interaction: discord.Interaction):
         )
         
         # Notify in parent channel
-        if EVENTS_CHANNEL_ID:
-            events_channel = bot.get_channel(EVENTS_CHANNEL_ID)
+        _ch_id = await get_guild_events_channel_id(interaction.guild_id)
+        if _ch_id:
+            events_channel = bot.get_channel(_ch_id)
         else:
             events_channel = interaction.channel.parent if isinstance(interaction.channel, discord.Thread) else interaction.channel
         
@@ -1963,7 +2118,8 @@ async def check_reminders():
                     logger.info(f'⏰ Reminder sent for "{event["event_name"]}" ({event["reminder_days"]} days before)')
                     
                     # Also send reminder in main events channel
-                    events_channel = bot.get_channel(EVENTS_CHANNEL_ID)
+                    _ch_id = await get_guild_events_channel_id(thread.guild.id)
+                    events_channel = bot.get_channel(_ch_id) if _ch_id else None
                     if events_channel:
                         reminder_msg = await events_channel.send(
                             f"{mention_text}\n"
@@ -2032,35 +2188,43 @@ async def cleanup_old_events():
 
 @tasks.loop(minutes=30)
 async def cleanup_non_thread_messages():
-    """Delete non-thread messages from the events channel."""
+    """Delete non-thread messages from each guild's designated events channel."""
     logger.info('Running non-thread message cleanup...')
     try:
-        events_channel = bot.get_channel(EVENTS_CHANNEL_ID)
-        if not events_channel:
-            return
-        
-        # Get messages from the last hour
-        one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
-        deleted_count = 0
-        
-        async for message in events_channel.history(limit=50, after=one_hour_ago):
-            # Don't delete thread starter messages or bot messages that are recent
-            if message.type not in [discord.MessageType.default, discord.MessageType.reply]:
+        for guild in bot.guilds:
+            settings = await database.get_guild_settings(guild.id)
+            channel_id = settings.get('events_channel_id') or EVENTS_CHANNEL_ID
+            if not channel_id:
                 continue
-            
-            # Check if message has a thread
-            if not message.thread:
-                # Delete messages older than 5 minutes
-                if datetime.now(timezone.utc) - message.created_at > timedelta(minutes=5):
-                    try:
-                        await message.delete()
-                        deleted_count += 1
-                    except:
-                        pass
-        
-        if deleted_count > 0:
-            logger.info(f'Deleted {deleted_count} non-thread message(s) from events channel')
-                        
+            events_channel = bot.get_channel(channel_id)
+            if not events_channel:
+                continue
+
+            # Only clean messages posted after the channel was explicitly assigned.
+            # For env-var-only channels (no DB record), fall back to the last hour.
+            assigned_at_str = settings.get('events_channel_assigned_at') if settings.get('events_channel_id') else None
+            if assigned_at_str:
+                cutoff = datetime.fromisoformat(assigned_at_str)
+                if cutoff.tzinfo is None:
+                    cutoff = cutoff.replace(tzinfo=timezone.utc)
+            else:
+                cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+
+            deleted_count = 0
+            async for message in events_channel.history(limit=50, after=cutoff):
+                if message.type not in [discord.MessageType.default, discord.MessageType.reply]:
+                    continue
+                if not message.thread:
+                    if datetime.now(timezone.utc) - message.created_at > timedelta(minutes=5):
+                        try:
+                            await message.delete()
+                            deleted_count += 1
+                        except:
+                            pass
+
+            if deleted_count > 0:
+                logger.info(f'[{guild.name}] Deleted {deleted_count} non-thread message(s) from events channel')
+
     except Exception as e:
         logger.error(f"Error in cleanup_non_thread_messages: {e}", exc_info=True)
 
@@ -2149,8 +2313,9 @@ if __name__ == "__main__":
         else:
             logger.info("Events can be created in any channel (EVENTS_CHANNEL_ID not set)")
         
-        # Add command group to bot tree
+        # Add command groups to bot tree
         bot.tree.add_command(event_group)
+        bot.tree.add_command(eventbot_group)
         
         try:
             bot.run(TOKEN)
