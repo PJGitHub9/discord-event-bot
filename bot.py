@@ -159,6 +159,95 @@ async def build_attendance_embed(thread_id: int, guild) -> discord.Embed:
     return attendance_embed
 
 
+async def build_event_announcement_embed(event_info: dict, guild) -> discord.Embed:
+    """Build the event announcement embed for the thread."""
+    event_name = event_info['event_name']
+    event_date = datetime.fromisoformat(event_info['event_date'])
+    is_tbd = event_date.year == 2099
+
+    embed = discord.Embed(
+        title=f"🎉 {event_name}",
+        color=discord.Color.blue(),
+        timestamp=datetime.now(timezone.utc)
+    )
+
+    if is_tbd:
+        embed.add_field(
+            name="📅 Date",
+            value="TBD - Vote on the poll below!",
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name="📅 Date",
+            value=event_date.strftime('%B %d, %Y at %I:%M %p'),
+            inline=False
+        )
+
+    author = guild.get_member(event_info['author_id'])
+    author_mention = author.mention if author else f"<@{event_info['author_id']}>"
+    embed.add_field(
+        name="👤 Organized by",
+        value=author_mention,
+        inline=False
+    )
+
+    if event_info.get('event_role_id'):
+        event_role = guild.get_role(event_info['event_role_id'])
+        if event_role:
+            embed.add_field(
+                name="🏷️ Event Role",
+                value=event_role.mention,
+                inline=False
+            )
+
+    reminder_days = event_info.get('reminder_days') or 0
+    if reminder_days > 0 and not is_tbd:
+        reminder_date = event_date - timedelta(days=reminder_days)
+        embed.add_field(
+            name="⏰ Reminder",
+            value=f"{reminder_days} day(s) before ({reminder_date.strftime('%B %d, %Y')})",
+            inline=False
+        )
+
+    embed.set_footer(text="Use /event help to see available commands")
+    return embed
+
+
+async def find_event_announcement_message(thread, event_info: dict):
+    """Try to find the original announcement message for the event."""
+    if event_info.get('event_message_id'):
+        try:
+            return await thread.fetch_message(event_info['event_message_id'])
+        except Exception as e:
+            logger.warning(f"Could not fetch stored announcement message id {event_info.get('event_message_id')}: {e}")
+
+    async for msg in thread.history(limit=100):
+        if msg.embeds:
+            emb = msg.embeds[0]
+            if emb.title == f"🎉 {event_info['event_name']}" and any(field.name == "📅 Date" for field in emb.fields):
+                return msg
+
+    return None
+
+
+async def can_manage_event(interaction: discord.Interaction, event_info: dict) -> bool:
+    """Return True if the user can manage the event based on author, master role, or admin."""
+    guild = interaction.guild
+    if not guild:
+        return False
+
+    author_role = guild.get_role(event_info['author_role_id'])
+    is_author = author_role in interaction.user.roles if author_role else False
+
+    master_role_id = await database.get_master_event_role_id(guild.id)
+    master_role = guild.get_role(master_role_id) if master_role_id else None
+    is_master_role = master_role in interaction.user.roles if master_role else False
+
+    is_admin = interaction.user.guild_permissions.administrator
+    return is_author or is_master_role or is_admin
+
+
 # Attendance Button View
 class AttendanceView(View):
     def __init__(self, event_role_id: int = None, thread_id: int = None):
@@ -763,7 +852,7 @@ async def create_event(
         embed.set_footer(text="Use /event help to see available commands")
         
         # Send announcement embed in thread
-        await thread.send(embed=embed)
+        announcement_msg = await thread.send(embed=embed)
         
         # Create poll if TBD
         if is_tbd:
@@ -819,6 +908,7 @@ async def create_event(
             author_id=author.id,
             author_role_id=author_role.id,
             event_role_id=event_role.id if event_role else None,
+            event_message_id=announcement_msg.id,
             reminder_days=reminder_days if not is_tbd else 0
         )
         logger.info(f'Event saved to database - Thread ID: {thread.id} | TBD: {is_tbd}')
@@ -1035,7 +1125,7 @@ async def ping_everyone(interaction: discord.Interaction):
 
 @event_group.command(
     name="finalize",
-    description="Finalize the event date from poll results (Author only)"
+    description="Finalize the event date from poll results (Author or Master Event role)"
 )
 @app_commands.describe(
     chosen_date="The final date for the event (YYYY-MM-DD HH:MM)"
@@ -1064,11 +1154,9 @@ async def finalize_date(interaction: discord.Interaction, chosen_date: str):
             )
             return
         
-        # Check if user is the author
-        author_role = interaction.guild.get_role(event_info['author_role_id'])
-        if author_role not in interaction.user.roles:
+        if not await can_manage_event(interaction, event_info):
             await interaction.followup.send(
-                "❌ Only the event author can use this command!",
+                "❌ Only the event author, master event role, or administrators can use this command!",
                 ephemeral=True
             )
             return
@@ -1127,7 +1215,7 @@ async def finalize_date(interaction: discord.Interaction, chosen_date: str):
 
 @event_group.command(
     name="updatedate",
-    description="Update the event date and time (Author only)"
+    description="Update the event date and time (Author or Master Event role)"
 )
 @app_commands.describe(
     new_date="The new date for the event (YYYY-MM-DD HH:MM)",
@@ -1165,11 +1253,9 @@ async def update_date(interaction: discord.Interaction, new_date: str, ping_part
             )
             return
         
-        # Check if user is the author
-        author_role = interaction.guild.get_role(event_info['author_role_id'])
-        if author_role not in interaction.user.roles:
+        if not await can_manage_event(interaction, event_info):
             await interaction.followup.send(
-                "❌ Only the event author can use this command!",
+                "❌ Only the event author, master event role, or administrators can use this command!",
                 ephemeral=True
             )
             return
@@ -1206,6 +1292,18 @@ async def update_date(interaction: discord.Interaction, new_date: str, ping_part
         # Update thread name
         new_thread_name = f"📅 {event_info['event_name']} - {parsed_date.strftime('%Y-%m-%d')}"
         await interaction.channel.edit(name=new_thread_name)
+
+        # Update the original announcement embed
+        try:
+            event_info['event_date'] = parsed_date.isoformat()
+            announcement_msg = await find_event_announcement_message(interaction.channel, event_info)
+            if announcement_msg:
+                updated_announcement_embed = await build_event_announcement_embed(event_info, interaction.guild)
+                await announcement_msg.edit(embed=updated_announcement_embed)
+            else:
+                logger.warning("Could not find original event announcement message to update embed.")
+        except Exception as e:
+            logger.error(f"Error updating event announcement embed: {e}", exc_info=True)
         
         # Send announcement in thread
         await interaction.channel.send(
@@ -1259,7 +1357,7 @@ async def update_date(interaction: discord.Interaction, new_date: str, ping_part
 
 @event_group.command(
     name="updatetitle",
-    description="Update the event title/name (Author only)"
+    description="Update the event title/name (Author or Master Event role)"
 )
 @app_commands.describe(
     new_title="The new title for the event"
@@ -1288,11 +1386,9 @@ async def update_title(interaction: discord.Interaction, new_title: str):
             )
             return
         
-        # Check if user is the author
-        author_role = interaction.guild.get_role(event_info['author_role_id'])
-        if author_role not in interaction.user.roles:
+        if not await can_manage_event(interaction, event_info):
             await interaction.followup.send(
-                "❌ Only the event author can use this command!",
+                "❌ Only the event author, master event role, or administrators can use this command!",
                 ephemeral=True
             )
             return
@@ -1317,6 +1413,18 @@ async def update_title(interaction: discord.Interaction, new_title: str):
             new_thread_name = f"📅 {new_title} - {event_date.strftime('%Y-%m-%d')}"
         
         await interaction.channel.edit(name=new_thread_name)
+
+        # Update the original announcement embed
+        try:
+            event_info['event_name'] = new_title
+            announcement_msg = await find_event_announcement_message(interaction.channel, event_info)
+            if announcement_msg:
+                updated_announcement_embed = await build_event_announcement_embed(event_info, interaction.guild)
+                await announcement_msg.edit(embed=updated_announcement_embed)
+            else:
+                logger.warning("Could not find original event announcement message to update embed.")
+        except Exception as e:
+            logger.error(f"Error updating event announcement embed: {e}", exc_info=True)
         
         # Send announcement
         await interaction.channel.send(
@@ -1369,14 +1477,9 @@ async def cancel_event(interaction: discord.Interaction):
             )
             return
         
-        # Check if user is the author or has admin permissions
-        author_role = interaction.guild.get_role(event_info['author_role_id'])
-        is_author = author_role in interaction.user.roles
-        is_admin = interaction.user.guild_permissions.administrator
-        
-        if not (is_author or is_admin):
+        if not await can_manage_event(interaction, event_info):
             await interaction.followup.send(
-                "❌ Only the event author or administrators can cancel this event!",
+                "❌ Only the event author, master event role, or administrators can cancel this event!",
                 ephemeral=True
             )
             return
@@ -1573,11 +1676,9 @@ async def event_attendance(interaction: discord.Interaction):
             )
             return
         
-        # Check if user is the author
-        author_role = interaction.guild.get_role(event_info['author_role_id'])
-        if author_role not in interaction.user.roles:
+        if not await can_manage_event(interaction, event_info):
             await interaction.followup.send(
-                "❌ Only the event author can resend the attendance message!",
+                "❌ Only the event author, master event role, or administrators can resend the attendance message!",
                 ephemeral=True
             )
             return
@@ -1634,6 +1735,48 @@ async def event_attendance(interaction: discord.Interaction):
 
 
 @event_group.command(
+    name="settings",
+    description="Configure event bot settings for this server"
+)
+@app_commands.describe(
+    master_event_role="Role that can manage/update all events"
+)
+async def event_settings(interaction: discord.Interaction, master_event_role: discord.Role = None):
+    """Configure the master event role for this guild."""
+    await interaction.response.defer(ephemeral=True)
+
+    if not interaction.guild:
+        await interaction.followup.send(
+            "❌ This command can only be used in a server.",
+            ephemeral=True
+        )
+        return
+
+    if not (interaction.user.guild_permissions.manage_guild or interaction.user.guild_permissions.administrator):
+        await interaction.followup.send(
+            "❌ Only server administrators or users with Manage Server permission can change event settings.",
+            ephemeral=True
+        )
+        return
+
+    await database.set_master_event_role(
+        interaction.guild.id,
+        master_event_role.id if master_event_role else None
+    )
+
+    if master_event_role:
+        await interaction.followup.send(
+            f"✅ Master event role set to {master_event_role.mention}. Users with this role can now manage events.",
+            ephemeral=True
+        )
+    else:
+        await interaction.followup.send(
+            "✅ Master event role cleared. Only event authors and admins can manage events.",
+            ephemeral=True
+        )
+
+
+@event_group.command(
     name="help",
     description="Show all available event commands"
 )
@@ -1668,7 +1811,8 @@ async def event_help(interaction: discord.Interaction):
         value=(
             "`/event updatedate` - Change the event date\n"
             "`/event updatetitle` - Change the event name\n"
-            "`/event finalize` - Set final date (for TBD events)"
+            "`/event finalize` - Set final date (for TBD events)\n"
+            "`/event settings` - Configure the master event role"
         ),
         inline=False
     )
@@ -1721,14 +1865,9 @@ async def close_event(interaction: discord.Interaction):
             )
             return
         
-        # Check if user is the author or has admin permissions
-        author_role = interaction.guild.get_role(event_info['author_role_id'])
-        is_author = author_role in interaction.user.roles
-        is_admin = interaction.user.guild_permissions.administrator
-        
-        if not (is_author or is_admin):
+        if not await can_manage_event(interaction, event_info):
             await interaction.followup.send(
-                "❌ Only the event author or administrators can close this event!",
+                "❌ Only the event author, master event role, or administrators can close this event!",
                 ephemeral=True
             )
             return

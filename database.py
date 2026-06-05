@@ -20,6 +20,7 @@ async def init_database():
                 author_id INTEGER NOT NULL,
                 author_role_id INTEGER,
                 event_role_id INTEGER,
+                event_message_id INTEGER,
                 reminder_days INTEGER DEFAULT 0,
                 reminder_sent BOOLEAN DEFAULT 0,
                 created_at TEXT NOT NULL,
@@ -31,6 +32,10 @@ async def init_database():
         
         # Add new columns if they don't exist (for existing databases)
         try:
+            await db.execute("ALTER TABLE events ADD COLUMN event_message_id INTEGER")
+        except:
+            pass
+        try:
             await db.execute("ALTER TABLE events ADD COLUMN close_prompt_count INTEGER DEFAULT 0")
         except:
             pass
@@ -38,6 +43,13 @@ async def init_database():
             await db.execute("ALTER TABLE events ADD COLUMN last_close_prompt TEXT")
         except:
             pass
+        
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_settings (
+                guild_id INTEGER UNIQUE NOT NULL,
+                master_event_role_id INTEGER
+            )
+        """)
         
         await db.execute("""
             CREATE TABLE IF NOT EXISTS attendance (
@@ -68,6 +80,7 @@ async def add_event(
     author_id: int,
     author_role_id: int,
     event_role_id: Optional[int] = None,
+    event_message_id: Optional[int] = None,
     reminder_days: int = 0
 ):
     """Add a new event to the database."""
@@ -75,8 +88,8 @@ async def add_event(
         await db.execute("""
             INSERT INTO events 
             (thread_id, event_name, event_date, author_id, author_role_id, 
-             event_role_id, reminder_days, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             event_role_id, event_message_id, reminder_days, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             thread_id,
             event_name,
@@ -84,6 +97,7 @@ async def add_event(
             author_id,
             author_role_id,
             event_role_id,
+            event_message_id,
             reminder_days,
             datetime.now().isoformat()
         ))
@@ -112,6 +126,33 @@ async def get_active_events() -> List[Dict]:
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+
+async def set_master_event_role(guild_id: int, role_id: Optional[int]):
+    """Set or clear the master event role for a guild."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            INSERT INTO guild_settings (guild_id, master_event_role_id)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET master_event_role_id = ?
+        """, (
+            guild_id,
+            role_id,
+            role_id
+        ))
+        await db.commit()
+
+
+async def get_master_event_role_id(guild_id: int) -> Optional[int]:
+    """Get the master event role ID configured for a guild."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT master_event_role_id FROM guild_settings WHERE guild_id = ?",
+            (guild_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row['master_event_role_id'] if row else None
 
 
 async def get_events_needing_reminders() -> List[Dict]:
