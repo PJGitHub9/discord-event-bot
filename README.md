@@ -239,6 +239,9 @@ Copy `themes.example.json` and rename it to `themes.json`:
 - `channel_ids`: each channel's ID (right-click channel → Copy Channel ID, with
   Developer Mode on). IDs can also come from the `THEME_CHANNEL_IDS` env var as JSON,
   e.g. `THEME_CHANNEL_IDS={"chess":123456789}`. File values win, and `0` means "not set".
+- **Categories** work the same way: add the category's ID under `channel_ids` with any key
+  (e.g. `"games_category": 123...`) and give it a name in each theme.
+  `/themes backup` saves category names too.
 - `themes`: each theme maps the same keys to new channel names. The optional `label`
   is what shows in the `/themes apply` picker.
 
