@@ -204,22 +204,43 @@ See [DOCKER.md](DOCKER.md) for detailed Docker documentation.
 
 ## 🎨 Seasonal Channel Themes
 
-`/theme` renames a set of channels in one go (e.g. Halloween → Christmas → Normal).
+Rename a set of channels in one go (e.g. Halloween → Christmas → Normal).
 Requires **Manage Channels** for both you and the bot.
 
-Themes are stored in a JSON file instead of the code, so you can edit names or add
-new themes without pulling new code or restarting. The file is re-read every time
-`/theme` runs, and new themes show up in the command's autocomplete.
+| Command | Description |
+|---------|-------------|
+| `/themes apply theme:` | Rename the channels to a theme (or restore a 💾 backup) |
+| `/themes refresh` | Reload `themes.json` after editing it, and report problems |
+| `/themes backup name:` | Save the current channel names as a dated backup |
 
-1. Copy `themes.example.json` to:
-   - `data/themes.json` when using Docker (it's in the mounted `./data` volume), or
-   - `themes.json` next to `bot.py` when running directly
-   - (or point the `THEMES_FILE` env var anywhere you like)
-2. Fill in `channel_ids` with each channel's ID (right-click channel → Copy Channel ID,
-   with Developer Mode on). IDs can also come from the `THEME_CHANNEL_IDS` env var
-   as JSON, e.g. `THEME_CHANNEL_IDS={"chess":123456789}`; file values win, and `0` means "not set".
-3. Under `themes`, each theme maps the same keys to new channel names. The optional
-   `label` is what shows in the `/theme` picker.
+Themes live in a JSON file instead of the code, so you can edit names or add new
+themes without pulling new code or restarting the bot. Just run `/themes refresh`.
+
+### Where to put `themes.json`
+
+Copy `themes.example.json` and rename it to `themes.json`:
+
+- **Docker / docker-compose:** `data/themes.json`, in the `data` folder next to
+  `docker-compose.yml`. That folder is mounted into the container as `/app/data`,
+  the same place `events.db` lives.
+- **Running `python bot.py` directly:** `themes.json` next to `bot.py`.
+- **Anywhere else:** set the `THEMES_FILE` env var to its full path
+  (inside the container, for Docker).
+
+### File format
+
+- `channel_ids`: each channel's ID (right-click channel → Copy Channel ID, with
+  Developer Mode on). IDs can also come from the `THEME_CHANNEL_IDS` env var as JSON,
+  e.g. `THEME_CHANNEL_IDS={"chess":123456789}`. File values win, and `0` means "not set".
+- `themes`: each theme maps the same keys to new channel names. The optional `label`
+  is what shows in the `/themes apply` picker.
+
+### Backups
+
+`/themes backup name: before-xmas` records the current name of every themed channel
+(plus a reference list of every channel in the server) to
+`theme_backups/<server id>/<date>_<time>_<name>.json` next to `themes.json`.
+Backups appear in `/themes apply` as 💾 entries, so you can restore them.
 
 ## 🗄️ Database
 
