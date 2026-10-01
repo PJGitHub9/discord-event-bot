@@ -202,6 +202,25 @@ See [DOCKER.md](DOCKER.md) for detailed Docker documentation.
 - **Reopen event**: `/event reopen` (anyone can reopen)
 - **Close event**: `/event close` (removes all roles permanently)
 
+## 🎨 Seasonal Channel Themes
+
+`/theme` renames a set of channels in one go (e.g. Halloween → Christmas → Normal).
+Requires **Manage Channels** for both you and the bot.
+
+Themes are stored in a JSON file instead of the code, so you can edit names or add
+new themes without pulling new code or restarting. The file is re-read every time
+`/theme` runs, and new themes show up in the command's autocomplete.
+
+1. Copy `themes.example.json` to:
+   - `data/themes.json` when using Docker (it's in the mounted `./data` volume), or
+   - `themes.json` next to `bot.py` when running directly
+   - (or point the `THEMES_FILE` env var anywhere you like)
+2. Fill in `channel_ids` with each channel's ID (right-click channel → Copy Channel ID,
+   with Developer Mode on). IDs can also come from the `THEME_CHANNEL_IDS` env var
+   as JSON, e.g. `THEME_CHANNEL_IDS={"chess":123456789}`; file values win, and `0` means "not set".
+3. Under `themes`, each theme maps the same keys to new channel names. The optional
+   `label` is what shows in the `/theme` picker.
+
 ## 🗄️ Database
 
 The bot uses SQLite to persist event data:
