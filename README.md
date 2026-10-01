@@ -207,6 +207,13 @@ See [DOCKER.md](DOCKER.md) for detailed Docker documentation.
 Rename a set of channels in one go (e.g. Halloween → Christmas → Normal).
 Requires **Manage Channels** for both you and the bot.
 
+> **Voice channels:** Discord only lets the bot rename a channel it can **see**, and
+> for voice channels also **connect to**, even if its role has Manage Channels.
+> If a channel's permission overrides deny *View Channel* or *Connect* to `@everyone`
+> or a role the bot has, add an override for the bot's role on that channel allowing
+> View Channel, Connect and Manage Channels. `/themes refresh` lists any channels the
+> bot can't rename and what's missing.
+
 | Command | Description |
 |---------|-------------|
 | `/themes apply theme:` | Rename the channels to a theme (or restore a 💾 backup) |

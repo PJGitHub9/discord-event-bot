@@ -2278,6 +2278,24 @@ async def theme_autocomplete(
     ][:25]
 
 
+def _missing_rename_permissions(channel, member: discord.Member) -> list[str]:
+    """Permissions the bot lacks to rename this channel (empty if none).
+
+    Discord also requires View Channel, and for voice/stage channels
+    Connect, before Manage Channels counts, so a channel-level deny of
+    either blocks renaming even when the bot's role has Manage Channels.
+    """
+    perms = channel.permissions_for(member)
+    missing = []
+    if not perms.view_channel:
+        missing.append("View Channel")
+    if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)) and not perms.connect:
+        missing.append("Connect")
+    if not missing and not perms.manage_channels:
+        missing.append("Manage Channels")
+    return missing
+
+
 async def _require_manage_channels(interaction: discord.Interaction) -> bool:
     """Send an error and return False if the user can't manage channels."""
     if not interaction.guild:
@@ -2385,6 +2403,18 @@ async def themes_apply(
             skipped.append(channel.name)
             continue
 
+        missing = _missing_rename_permissions(channel, interaction.guild.me)
+        if missing:
+            failed.append(
+                f"{channel_key} ({channel.name}): bot needs "
+                f"{' + '.join(missing)} on this channel"
+            )
+            logger.error(
+                f"Cannot rename channel {channel_id} ({channel.name}): "
+                f"bot is missing {', '.join(missing)}"
+            )
+            continue
+
         old_name = channel.name
 
         try:
@@ -2406,7 +2436,8 @@ async def themes_apply(
 
         except discord.Forbidden:
             failed.append(
-                f"{channel_key}: missing Manage Channels permission"
+                f"{channel_key}: Discord denied the rename "
+                f"(check this channel's permission overrides)"
             )
 
             logger.error(
@@ -2480,12 +2511,20 @@ async def themes_refresh(interaction: discord.Interaction):
         status = f"⚠️ missing: {', '.join(missing)}" if missing else "✅"
         lines.append(f"• {_theme_display_name(key, theme)} (`{key}`) {status}")
 
-    not_found = [
-        key for key, channel_id in THEME_CHANNEL_IDS.items()
-        if interaction.guild.get_channel(channel_id) is None
-    ]
+    not_found = []
+    no_access = []
+    for key, channel_id in THEME_CHANNEL_IDS.items():
+        channel = interaction.guild.get_channel(channel_id)
+        if channel is None:
+            not_found.append(key)
+            continue
+        missing = _missing_rename_permissions(channel, interaction.guild.me)
+        if missing:
+            no_access.append(f"• {key} ({channel.name}): needs {' + '.join(missing)}")
     if not_found:
         lines.extend(["", f"⚠️ Channels not found in this server: {', '.join(not_found)}"])
+    if no_access:
+        lines.extend(["", "🔒 **Bot can't rename these channels:**", *no_access])
 
     backups = _list_guild_backups(interaction.guild.id)
     if backups:
