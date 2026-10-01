@@ -11,6 +11,7 @@ import database
 import logging
 import aiosqlite
 import json
+import re
 
 # Setup logging
 logging.basicConfig(
@@ -2093,9 +2094,9 @@ async def close_event(interaction: discord.Interaction):
 # Themes live in a JSON file: /app/data/themes.json in Docker (which
 # is ./data/themes.json on the host via the mounted volume), or
 # ./themes.json when run directly. Override with THEMES_FILE.
-# The file is re-read every
-# time /theme is used, so you can edit it locally without rebuilding
-# or restarting the bot. See themes.example.json for the format.
+# The file is loaded at startup and again whenever /themes refresh
+# is used, so you can edit it locally without rebuilding or
+# restarting the bot. See themes.example.json for the format.
 #
 # Channel IDs can go in the file's "channel_ids" section, or be
 # supplied through the THEME_CHANNEL_IDS environment variable:
@@ -2103,11 +2104,34 @@ async def close_event(interaction: discord.Interaction):
 #
 # Using channel IDs instead of names means the bot can safely
 # rename channels back and forth between themes.
+#
+# /themes backup saves a snapshot of the current channel names to
+# theme_backups/<guild id>/ next to the themes file. Backups show
+# up in /themes apply so a snapshot can be restored later.
 
 THEMES_FILE = os.getenv(
     "THEMES_FILE",
     os.path.join(database.DATA_DIR, "themes.json")
 ).strip()
+
+THEME_BACKUPS_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(THEMES_FILE)),
+    "theme_backups"
+)
+
+BACKUP_CHOICE_PREFIX = "backup:"
+
+# Cached contents of the themes file, replaced by /themes refresh.
+THEME_CHANNEL_IDS: dict = {}
+CHANNEL_THEMES: dict = {}
+THEME_CONFIG_ERROR: str | None = None
+
+themes_group = app_commands.Group(
+    name="themes",
+    description="Seasonal channel themes",
+    guild_only=True,
+    default_permissions=discord.Permissions(manage_channels=True)
+)
 
 
 def _load_env_theme_channel_ids() -> dict:
@@ -2145,6 +2169,10 @@ def load_theme_config() -> tuple[dict, dict]:
     if not isinstance(themes, dict) or not themes:
         raise ValueError(f"`{THEMES_FILE}` needs a non-empty \"themes\" object.")
 
+    for key, theme in themes.items():
+        if not isinstance(theme, dict):
+            raise ValueError(f"Theme \"{key}\" must be a JSON object.")
+
     channel_ids = _load_env_theme_channel_ids()
     file_ids = config.get("channel_ids", {})
     if not isinstance(file_ids, dict):
@@ -2159,83 +2187,173 @@ def load_theme_config() -> tuple[dict, dict]:
     return channel_ids, themes
 
 
+def reload_theme_config() -> None:
+    """Re-read the themes file into the cache.
+
+    On failure the previously loaded themes are kept and the error is
+    remembered so it can be shown to the user.
+    """
+    global THEME_CHANNEL_IDS, CHANNEL_THEMES, THEME_CONFIG_ERROR
+    try:
+        THEME_CHANNEL_IDS, CHANNEL_THEMES = load_theme_config()
+        THEME_CONFIG_ERROR = None
+        logger.info(
+            f"Loaded {len(CHANNEL_THEMES)} theme(s) and "
+            f"{len(THEME_CHANNEL_IDS)} channel ID(s) from {THEMES_FILE}"
+        )
+    except ValueError as e:
+        THEME_CONFIG_ERROR = str(e)
+        logger.warning(f"Could not load themes: {e}")
+
+
+reload_theme_config()
+
+
 def _theme_display_name(theme_key: str, theme: dict) -> str:
     label = theme.get("label") if isinstance(theme, dict) else None
     return label or theme_key.replace("_", " ").title()
+
+
+def _guild_backup_dir(guild_id: int) -> str:
+    return os.path.join(THEME_BACKUPS_DIR, str(guild_id))
+
+
+def _list_guild_backups(guild_id: int) -> list[str]:
+    """Backup file names for a guild, newest first."""
+    try:
+        files = os.listdir(_guild_backup_dir(guild_id))
+    except FileNotFoundError:
+        return []
+    return sorted((f for f in files if f.endswith(".json")), reverse=True)
+
+
+def _backup_display_name(filename: str) -> str:
+    # Files are named YYYY-MM-DD_HHMMSS_<name>.json
+    stem = filename[:-len(".json")]
+    date_part, _, name = stem.partition("_")
+    _, _, name = name.partition("_")
+    return f"💾 {name or stem} ({date_part})"
+
+
+def _load_backup(guild_id: int, filename: str) -> tuple[dict, dict]:
+    """Read a backup. Returns (channel_ids, theme)."""
+    # Only allow plain file names so a crafted value can't escape the folder.
+    if os.path.basename(filename) != filename or not filename.endswith(".json"):
+        raise ValueError("Invalid backup name.")
+    path = os.path.join(_guild_backup_dir(guild_id), filename)
+    try:
+        with open(path, encoding="utf-8") as f:
+            backup = json.load(f)
+        channel_ids = {str(k): int(v) for k, v in backup["channel_ids"].items()}
+        theme = backup["theme"]
+        if not isinstance(theme, dict):
+            raise TypeError("theme must be an object")
+    except FileNotFoundError:
+        raise ValueError(f"Backup `{filename}` not found.")
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as e:
+        raise ValueError(f"Backup `{filename}` is unreadable: {e}")
+    return channel_ids, theme
 
 
 async def theme_autocomplete(
     interaction: discord.Interaction,
     current: str
 ) -> list[app_commands.Choice[str]]:
-    try:
-        _, themes = load_theme_config()
-    except ValueError:
-        return []
     current = current.lower()
-    return [
+    choices = [
         app_commands.Choice(name=_theme_display_name(key, theme)[:100], value=key)
-        for key, theme in themes.items()
-        if current in key.lower() or current in _theme_display_name(key, theme).lower()
+        for key, theme in CHANNEL_THEMES.items()
+    ]
+    if interaction.guild_id:
+        choices += [
+            app_commands.Choice(
+                name=_backup_display_name(filename)[:100],
+                value=f"{BACKUP_CHOICE_PREFIX}{filename}"[:100]
+            )
+            for filename in _list_guild_backups(interaction.guild_id)
+        ]
+    return [
+        choice for choice in choices
+        if current in choice.name.lower() or current in choice.value.lower()
     ][:25]
 
 
-@bot.tree.command(
-    name="theme",
-    description="Change the server's seasonal channel theme."
-)
-@app_commands.describe(
-    theme="Choose the channel theme to apply."
-)
-@app_commands.autocomplete(theme=theme_autocomplete)
-@app_commands.default_permissions(manage_channels=True)
-async def theme_command(
-    interaction: discord.Interaction,
-    theme: str
-):
-    """Rename the configured channels for a seasonal theme."""
-
+async def _require_manage_channels(interaction: discord.Interaction) -> bool:
+    """Send an error and return False if the user can't manage channels."""
     if not interaction.guild:
         await interaction.response.send_message(
             "❌ This command can only be used in a server.",
             ephemeral=True
         )
-        return
+        return False
 
-    # Require the person using the command to have
-    # Manage Channels permission.
     if not interaction.user.guild_permissions.manage_channels:
         await interaction.response.send_message(
             "❌ You need **Manage Channels** permission to use this command.",
             ephemeral=True
         )
+        return False
+
+    return True
+
+
+@themes_group.command(
+    name="apply",
+    description="Change the server's seasonal channel theme."
+)
+@app_commands.describe(
+    theme="Choose the channel theme (or 💾 backup) to apply."
+)
+@app_commands.autocomplete(theme=theme_autocomplete)
+async def themes_apply(
+    interaction: discord.Interaction,
+    theme: str
+):
+    """Rename the configured channels for a seasonal theme."""
+
+    if not await _require_manage_channels(interaction):
         return
 
-    try:
-        theme_channel_ids, channel_themes = load_theme_config()
-    except ValueError as e:
-        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
-        return
+    if theme.startswith(BACKUP_CHOICE_PREFIX):
+        try:
+            theme_channel_ids, selected_theme = _load_backup(
+                interaction.guild.id,
+                theme[len(BACKUP_CHOICE_PREFIX):]
+            )
+        except ValueError as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
+        theme_name = _backup_display_name(theme[len(BACKUP_CHOICE_PREFIX):])
+
+    else:
+        if not CHANNEL_THEMES:
+            await interaction.response.send_message(
+                f"❌ No themes are loaded: {THEME_CONFIG_ERROR}\n"
+                "Fix the file and run `/themes refresh`.",
+                ephemeral=True
+            )
+            return
+
+        selected_theme = CHANNEL_THEMES.get(theme)
+        if selected_theme is None:
+            await interaction.response.send_message(
+                f"❌ Unknown theme **{theme}**. Available: "
+                + ", ".join(f"`{key}`" for key in CHANNEL_THEMES),
+                ephemeral=True
+            )
+            return
+
+        theme_channel_ids = THEME_CHANNEL_IDS
+        theme_name = _theme_display_name(theme, selected_theme)
 
     if not theme_channel_ids:
         await interaction.response.send_message(
             "❌ Seasonal themes are not configured yet. Add a **channel_ids** "
             "section to the themes file or set the **THEME_CHANNEL_IDS** "
-            "environment variable.",
+            "environment variable, then run `/themes refresh`.",
             ephemeral=True
         )
         return
-
-    selected_theme = channel_themes.get(theme)
-    if not isinstance(selected_theme, dict):
-        await interaction.response.send_message(
-            f"❌ Unknown theme **{theme}**. Available: "
-            + ", ".join(f"`{key}`" for key in channel_themes),
-            ephemeral=True
-        )
-        return
-
-    theme_name = _theme_display_name(theme, selected_theme)
 
     await interaction.response.defer(ephemeral=True)
 
@@ -2328,6 +2446,146 @@ async def theme_command(
         "\n".join(result_lines),
         ephemeral=True
     )
+
+
+@themes_group.command(
+    name="refresh",
+    description="Reload the themes JSON file without restarting the bot."
+)
+async def themes_refresh(interaction: discord.Interaction):
+    """Re-read the themes file and report what was found."""
+
+    if not await _require_manage_channels(interaction):
+        return
+
+    reload_theme_config()
+
+    if THEME_CONFIG_ERROR:
+        message = f"❌ {THEME_CONFIG_ERROR}"
+        if CHANNEL_THEMES:
+            message += "\nThe previously loaded themes are still in use."
+        await interaction.response.send_message(message, ephemeral=True)
+        return
+
+    lines = [
+        "🔄 **Themes reloaded!**",
+        "",
+        f"📁 File: `{THEMES_FILE}`",
+        f"📺 Channels: **{len(THEME_CHANNEL_IDS)}**",
+        f"🎨 Themes: **{len(CHANNEL_THEMES)}**",
+    ]
+
+    for key, theme in CHANNEL_THEMES.items():
+        missing = [k for k in THEME_CHANNEL_IDS if not theme.get(k)]
+        status = f"⚠️ missing: {', '.join(missing)}" if missing else "✅"
+        lines.append(f"• {_theme_display_name(key, theme)} (`{key}`) {status}")
+
+    not_found = [
+        key for key, channel_id in THEME_CHANNEL_IDS.items()
+        if interaction.guild.get_channel(channel_id) is None
+    ]
+    if not_found:
+        lines.extend(["", f"⚠️ Channels not found in this server: {', '.join(not_found)}"])
+
+    backups = _list_guild_backups(interaction.guild.id)
+    if backups:
+        lines.extend(["", f"💾 Backups: **{len(backups)}**"])
+
+    await interaction.response.send_message("\n".join(lines)[:2000], ephemeral=True)
+
+
+@themes_group.command(
+    name="backup",
+    description="Save the current channel names as a backup you can restore."
+)
+@app_commands.describe(
+    name="A short name for this backup (letters, numbers, - and _)."
+)
+async def themes_backup(interaction: discord.Interaction, name: str):
+    """Snapshot the current channel names to a JSON file."""
+
+    if not await _require_manage_channels(interaction):
+        return
+
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", name.strip()).strip("-")[:40]
+    if not safe_name:
+        await interaction.response.send_message(
+            "❌ Please give the backup a name using letters, numbers, - or _.",
+            ephemeral=True
+        )
+        return
+
+    guild = interaction.guild
+    now = datetime.now(timezone.utc)
+
+    # The themed channels, keyed the same way as the themes file so
+    # the backup can be applied like any other theme.
+    channel_ids = {}
+    theme = {"label": f"💾 {safe_name} ({now:%Y-%m-%d})"}
+    for key, channel_id in THEME_CHANNEL_IDS.items():
+        channel = guild.get_channel(channel_id)
+        if channel is not None:
+            channel_ids[key] = channel_id
+            theme[key] = channel.name
+
+    # Every channel in the server, for reference.
+    all_channels = [
+        {
+            "id": channel.id,
+            "name": channel.name,
+            "type": str(channel.type),
+            "category": channel.category.name if channel.category else None,
+        }
+        for channel in sorted(guild.channels, key=lambda c: (c.position, c.id))
+    ]
+
+    backup = {
+        "name": safe_name,
+        "created_at": now.isoformat(),
+        "created_by": str(interaction.user),
+        "guild_id": guild.id,
+        "guild_name": guild.name,
+        "channel_ids": channel_ids,
+        "theme": theme,
+        "all_channels": all_channels,
+    }
+
+    filename = f"{now:%Y-%m-%d_%H%M%S}_{safe_name}.json"
+    path = os.path.join(_guild_backup_dir(guild.id), filename)
+
+    try:
+        os.makedirs(_guild_backup_dir(guild.id), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(backup, f, indent=2, ensure_ascii=False)
+    except OSError as e:
+        logger.error(f"Could not write theme backup {path}: {e}")
+        await interaction.response.send_message(
+            f"❌ Could not save the backup: {e}",
+            ephemeral=True
+        )
+        return
+
+    logger.info(
+        f"[{guild.name}] Theme backup '{safe_name}' saved to {path} "
+        f"by {interaction.user}"
+    )
+
+    lines = [
+        f"💾 **Backup saved: {safe_name}**",
+        "",
+        f"🎨 Themed channels saved: **{len(channel_ids)}**",
+        f"📺 All channels recorded: **{len(all_channels)}**",
+        f"📁 `{path}`",
+    ]
+    if channel_ids:
+        lines.append("\nRestore it any time with `/themes apply` → 💾 " + safe_name)
+    else:
+        lines.append(
+            "\n⚠️ No themed channels are configured, so this backup "
+            "only records the channel list and can't be applied."
+        )
+
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
 @tasks.loop(hours=1)
@@ -2561,6 +2819,7 @@ if __name__ == "__main__":
         # Add command groups to bot tree
         bot.tree.add_command(event_group)
         bot.tree.add_command(eventbot_group)
+        bot.tree.add_command(themes_group)
         
         try:
             bot.run(TOKEN)
