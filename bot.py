@@ -2121,6 +2121,10 @@ THEME_BACKUPS_DIR = os.path.join(
 
 BACKUP_CHOICE_PREFIX = "backup:"
 
+# Seconds to wait for a channel rename before assuming Discord is
+# rate limiting it.
+THEME_RENAME_TIMEOUT = 8
+
 # Cached contents of the themes file, replaced by /themes refresh.
 THEME_CHANNEL_IDS: dict = {}
 CHANNEL_THEMES: dict = {}
@@ -2378,6 +2382,8 @@ async def themes_apply(
     renamed = []
     skipped = []
     failed = []
+    rate_limited = []
+    to_rename = []
 
     for channel_key, channel_id in theme_channel_ids.items():
 
@@ -2415,24 +2421,36 @@ async def themes_apply(
             )
             continue
 
+        to_rename.append((channel_key, channel, new_name))
+
+    async def rename(channel_key, channel, new_name):
         old_name = channel.name
 
         try:
-            await channel.edit(
-                name=new_name,
-                reason=(
-                    f"Seasonal theme changed to "
-                    f"{theme} by {interaction.user}"
+            # discord.py silently waits out rate limits (renames are
+            # limited to 2 per channel every 10 minutes), which would
+            # leave the command "thinking" for minutes. Give up instead.
+            await asyncio.wait_for(
+                channel.edit(
+                    name=new_name,
+                    reason=(
+                        f"Seasonal theme changed to "
+                        f"{theme} by {interaction.user}"
+                    )
+                ),
+                timeout=THEME_RENAME_TIMEOUT
+            )
+
+        except (asyncio.TimeoutError, discord.RateLimited):
+            # The rename may have gone through and only the cooldown
+            # after it timed out, so check the channel's actual name.
+            if channel.name != new_name:
+                rate_limited.append(old_name)
+                logger.warning(
+                    f"[{interaction.guild.name}] Rate limited while renaming "
+                    f"#{old_name} -> #{new_name}; gave up"
                 )
-            )
-
-            renamed.append(new_name)
-
-            logger.info(
-                f"[{interaction.guild.name}] "
-                f"Renamed #{old_name} -> #{new_name} "
-                f"for {theme} theme by {interaction.user}"
-            )
+                return
 
         except discord.Forbidden:
             failed.append(
@@ -2442,8 +2460,9 @@ async def themes_apply(
 
             logger.error(
                 f"Permission denied while renaming "
-                f"channel {channel_id}"
+                f"channel {channel.id}"
             )
+            return
 
         except discord.HTTPException as e:
             failed.append(
@@ -2452,16 +2471,43 @@ async def themes_apply(
 
             logger.error(
                 f"Discord error while renaming "
-                f"channel {channel_id}: {e}"
+                f"channel {channel.id}: {e}"
             )
+            return
+
+        renamed.append(new_name)
+
+        logger.info(
+            f"[{interaction.guild.name}] "
+            f"Renamed #{old_name} -> #{new_name} "
+            f"for {theme} theme by {interaction.user}"
+        )
+
+    # Each channel has its own rate limit, so rename them all at once.
+    await asyncio.gather(*(rename(*item) for item in to_rename))
 
     result_lines = [
         f"🎨 **Theme changed to {theme_name}!**",
         "",
         f"✅ Renamed: **{len(renamed)}**",
         f"⏭️ Already correct: **{len(skipped)}**",
-        f"❌ Failed: **{len(failed)}**",
     ]
+
+    if rate_limited:
+        result_lines.append(f"⏳ Rate limited: **{len(rate_limited)}**")
+
+    result_lines.append(f"❌ Failed: **{len(failed)}**")
+
+    if rate_limited:
+        result_lines.extend([
+            "",
+            "⏳ **Discord is rate limiting renames** (max 2 per channel every "
+            "10 minutes). Try again in a few minutes to finish:",
+            *[
+                f"• {name}"
+                for name in rate_limited[:10]
+            ]
+        ])
 
     if failed:
         result_lines.extend([
