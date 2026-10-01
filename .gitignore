@@ -36,3 +36,6 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Local seasonal theme config
+themes.json

@@ -1,0 +1,80 @@
+{
+  "channel_ids": {
+    "chess": 0,
+    "deals": 0,
+    "sports": 0,
+    "f1": 0,
+    "magical_league": 0,
+    "survivors": 0,
+    "anime": 0,
+    "nsfw": 0,
+    "general": 0,
+    "hangout": 0,
+    "wow_grape": 0,
+    "fortnite": 0,
+    "giga_chads": 0,
+    "timeout": 0
+  },
+
+  "themes": {
+    "halloween": {
+      "label": "🎃 Halloween",
+
+      "chess": "♟️│cursed-chessboard",
+      "deals": "💰│haunted-deals",
+      "sports": "🏈│monster-sports",
+      "f1": "🏎️│graveyard-grand-prix",
+      "magical_league": "🔮│magical-league-gathering",
+      "survivors": "💀│last-souls-standing",
+      "anime": "👻│haunted-anime-club",
+      "nsfw": "🔥│forbidden-crypt",
+
+      "general": "Haunted Hall 👻",
+      "hangout": "Witching Hour 🕯️",
+      "wow_grape": "Witches' Brew 🍇",
+      "fortnite": "Trick-or-Treat Grounds 🎃",
+      "giga_chads": "Giga Ghouls ONLY 🧟",
+      "timeout": "❌ Disconnected Graveyard ❌"
+    },
+
+    "christmas": {
+      "label": "🎄 Christmas",
+
+      "chess": "♟️│snowbound-chessboard",
+      "deals": "💸│holiday-deals",
+      "sports": "🏈│festive-sports",
+      "f1": "🛷│santas-sleigh-race",
+      "magical_league": "🎄│magical-winter-gathering",
+      "survivors": "🎅│santas-survivors",
+      "anime": "🎄│holly-jolly-anime-club",
+      "nsfw": "🔔│naughty-list-lounge",
+
+      "general": "Frosty's Lodge ❄️",
+      "hangout": "Santa's Workshop 🎅",
+      "wow_grape": "Reindeer Stables 🦌",
+      "fortnite": "Toy Soldier Battleground 🎁",
+      "giga_chads": "Giga Elves ONLY 🧝",
+      "timeout": "❌ North Pole Timeout ❌"
+    },
+
+    "normal": {
+      "label": "⚪ Normal",
+
+      "chess": "♟️│chess",
+      "deals": "💸│deals-and-promos",
+      "sports": "🏈│sports",
+      "f1": "🏎️│f1",
+      "magical_league": "🔮│magical-league-gathering",
+      "survivors": "🪖│survivors",
+      "anime": "🔺│anime",
+      "nsfw": "🍆│nsfw",
+
+      "general": "General 😎",
+      "hangout": "The Hangout ⚡",
+      "wow_grape": "WoW Grape 🍇",
+      "fortnite": "We Love Fortnite 🎮",
+      "giga_chads": "Giga Chads ONLY 💪",
+      "timeout": "❌ Timeout Corner ❌"
+    }
+  }
+}

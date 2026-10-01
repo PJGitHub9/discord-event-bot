@@ -10,6 +10,7 @@ import asyncio
 import database
 import logging
 import aiosqlite
+import json
 
 # Setup logging
 logging.basicConfig(
@@ -2083,6 +2084,250 @@ async def close_event(interaction: discord.Interaction):
         )
 
 
+
+
+# ============================================================
+# Seasonal Channel Themes
+# ============================================================
+
+# Themes live in a JSON file: /app/data/themes.json in Docker (which
+# is ./data/themes.json on the host via the mounted volume), or
+# ./themes.json when run directly. Override with THEMES_FILE.
+# The file is re-read every
+# time /theme is used, so you can edit it locally without rebuilding
+# or restarting the bot. See themes.example.json for the format.
+#
+# Channel IDs can go in the file's "channel_ids" section, or be
+# supplied through the THEME_CHANNEL_IDS environment variable:
+# THEME_CHANNEL_IDS={"chess":123456789,"deals":987654321}
+#
+# Using channel IDs instead of names means the bot can safely
+# rename channels back and forth between themes.
+
+THEMES_FILE = os.getenv(
+    "THEMES_FILE",
+    os.path.join(database.DATA_DIR, "themes.json")
+).strip()
+
+
+def _load_env_theme_channel_ids() -> dict:
+    raw = os.getenv("THEME_CHANNEL_IDS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return {str(key): int(value) for key, value in parsed.items()}
+        logger.error("THEME_CHANNEL_IDS must contain a JSON object.")
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        logger.error(f"Could not parse THEME_CHANNEL_IDS: {e}")
+    return {}
+
+
+def load_theme_config() -> tuple[dict, dict]:
+    """Read the themes file. Returns (channel_ids, themes).
+
+    Raises ValueError with a readable message if the file is missing
+    or malformed.
+    """
+    try:
+        with open(THEMES_FILE, encoding="utf-8") as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        raise ValueError(f"Themes file not found: `{THEMES_FILE}`")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"`{THEMES_FILE}` is not valid JSON: {e}")
+
+    if not isinstance(config, dict):
+        raise ValueError(f"`{THEMES_FILE}` must contain a JSON object.")
+
+    themes = config.get("themes")
+    if not isinstance(themes, dict) or not themes:
+        raise ValueError(f"`{THEMES_FILE}` needs a non-empty \"themes\" object.")
+
+    channel_ids = _load_env_theme_channel_ids()
+    file_ids = config.get("channel_ids", {})
+    if not isinstance(file_ids, dict):
+        raise ValueError("\"channel_ids\" must be a JSON object.")
+    try:
+        # Values in the file take priority over the environment variable.
+        # A 0 is treated as "not set" so placeholder IDs are ignored.
+        channel_ids.update({str(k): int(v) for k, v in file_ids.items() if int(v)})
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"\"channel_ids\" contains an invalid ID: {e}")
+
+    return channel_ids, themes
+
+
+def _theme_display_name(theme_key: str, theme: dict) -> str:
+    label = theme.get("label") if isinstance(theme, dict) else None
+    return label or theme_key.replace("_", " ").title()
+
+
+async def theme_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+) -> list[app_commands.Choice[str]]:
+    try:
+        _, themes = load_theme_config()
+    except ValueError:
+        return []
+    current = current.lower()
+    return [
+        app_commands.Choice(name=_theme_display_name(key, theme)[:100], value=key)
+        for key, theme in themes.items()
+        if current in key.lower() or current in _theme_display_name(key, theme).lower()
+    ][:25]
+
+
+@bot.tree.command(
+    name="theme",
+    description="Change the server's seasonal channel theme."
+)
+@app_commands.describe(
+    theme="Choose the channel theme to apply."
+)
+@app_commands.autocomplete(theme=theme_autocomplete)
+@app_commands.default_permissions(manage_channels=True)
+async def theme_command(
+    interaction: discord.Interaction,
+    theme: str
+):
+    """Rename the configured channels for a seasonal theme."""
+
+    if not interaction.guild:
+        await interaction.response.send_message(
+            "❌ This command can only be used in a server.",
+            ephemeral=True
+        )
+        return
+
+    # Require the person using the command to have
+    # Manage Channels permission.
+    if not interaction.user.guild_permissions.manage_channels:
+        await interaction.response.send_message(
+            "❌ You need **Manage Channels** permission to use this command.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        theme_channel_ids, channel_themes = load_theme_config()
+    except ValueError as e:
+        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return
+
+    if not theme_channel_ids:
+        await interaction.response.send_message(
+            "❌ Seasonal themes are not configured yet. Add a **channel_ids** "
+            "section to the themes file or set the **THEME_CHANNEL_IDS** "
+            "environment variable.",
+            ephemeral=True
+        )
+        return
+
+    selected_theme = channel_themes.get(theme)
+    if not isinstance(selected_theme, dict):
+        await interaction.response.send_message(
+            f"❌ Unknown theme **{theme}**. Available: "
+            + ", ".join(f"`{key}`" for key in channel_themes),
+            ephemeral=True
+        )
+        return
+
+    theme_name = _theme_display_name(theme, selected_theme)
+
+    await interaction.response.defer(ephemeral=True)
+
+    renamed = []
+    skipped = []
+    failed = []
+
+    for channel_key, channel_id in theme_channel_ids.items():
+
+        new_name = selected_theme.get(channel_key)
+
+        if not new_name:
+            failed.append(
+                f"{channel_key}: no name configured"
+            )
+            continue
+
+        channel = interaction.guild.get_channel(channel_id)
+
+        if channel is None:
+            failed.append(
+                f"{channel_key}: channel not found ({channel_id})"
+            )
+            continue
+
+        # Don't make an API call if the channel already has
+        # the correct name.
+        if channel.name == new_name:
+            skipped.append(channel.name)
+            continue
+
+        old_name = channel.name
+
+        try:
+            await channel.edit(
+                name=new_name,
+                reason=(
+                    f"Seasonal theme changed to "
+                    f"{theme} by {interaction.user}"
+                )
+            )
+
+            renamed.append(new_name)
+
+            logger.info(
+                f"[{interaction.guild.name}] "
+                f"Renamed #{old_name} -> #{new_name} "
+                f"for {theme} theme by {interaction.user}"
+            )
+
+        except discord.Forbidden:
+            failed.append(
+                f"{channel_key}: missing Manage Channels permission"
+            )
+
+            logger.error(
+                f"Permission denied while renaming "
+                f"channel {channel_id}"
+            )
+
+        except discord.HTTPException as e:
+            failed.append(
+                f"{channel_key}: Discord error ({e})"
+            )
+
+            logger.error(
+                f"Discord error while renaming "
+                f"channel {channel_id}: {e}"
+            )
+
+    result_lines = [
+        f"🎨 **Theme changed to {theme_name}!**",
+        "",
+        f"✅ Renamed: **{len(renamed)}**",
+        f"⏭️ Already correct: **{len(skipped)}**",
+        f"❌ Failed: **{len(failed)}**",
+    ]
+
+    if failed:
+        result_lines.extend([
+            "",
+            "**Failures:**",
+            *[
+                f"• {item}"
+                for item in failed[:10]
+            ]
+        ])
+
+    await interaction.followup.send(
+        "\n".join(result_lines),
+        ephemeral=True
+    )
 
 
 @tasks.loop(hours=1)
